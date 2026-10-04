@@ -57,7 +57,7 @@ A workaround for an Eclipse bug is recorded in `docs/platform-bugs.md` with what
 ## Architecture rules
 
 **`com.vogella.eclipse.mcp.core` stays clean.**
-No reference to the MCP SDK, Jetty or any UI bundle, because it is a candidate for contribution to the Eclipse Platform; that is also why it has its own JSON reader and writer in `com.vogella.eclipse.mcp.core.json`.
+No reference to the MCP SDK, Jetty or any UI bundle, so tools are written and tested against a small stable API, run headless and in RCP applications, and do not change when the protocol library does; that is also why it has its own JSON reader and writer in `com.vogella.eclipse.mcp.core.json`.
 When a core tool needs the UI, core declares a hook and `McpUiPlugin.start` registers the implementation, as `LogClearedHandlers` and `UiDispatch` do.
 A failing handler never turns a completed operation into a failed call.
 
