@@ -153,8 +153,9 @@ public final class UiThread {
 	}
 
 	/**
-	 * The executor core tools reach the UI thread through. Inline without a
-	 * workbench, so a headless run behaves as if nothing were registered.
+	 * Tools outside the UI bundle reach the UI thread through this executor. It
+	 * runs inline without a workbench, so a headless run behaves as if nothing
+	 * were registered.
 	 */
 	static final UiDispatch.Executor EXECUTOR = new UiDispatch.Executor() {
 		@Override

@@ -28,11 +28,11 @@ public class McpUiPlugin extends AbstractUIPlugin {
 	public void start(BundleContext context) throws Exception {
 		super.start(context);
 		plugin = this;
-		// the core bundle clears the log file and must not know about any view, so
-		// the part that empties the view is registered from this side
+		// Tools outside the UI bundle report log clears through the core hook; this
+		// bundle registers the handler that refreshes the view.
 		LogClearedHandlers.set(errorLogRefresh);
-		// a preference write from a worker thread reaches editor listeners that
-		// assume the UI thread, so core writes through this
+		// Tools outside the UI bundle use the core hook for preference writes whose
+		// listeners assume the UI thread, so register this executor there.
 		UiDispatch.set(UiThread.EXECUTOR);
 	}
 

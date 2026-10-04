@@ -36,7 +36,7 @@ import com.vogella.eclipse.mcp.core.json.JsonObject;
  * Imports projects that already exist on disk, through the platform's own smart
  * import.
  * <p>
- * This lives in the ui bundle rather than in core because
+ * This lives in the UI bundle rather than in basic because
  * {@link SmartImportJob} is in {@code org.eclipse.ui.ide}, and it is reached
  * through a discouraged access to an {@code x-internal} package. That was a
  * deliberate decision: the alternative is a hand written walk for {@code

@@ -3,7 +3,8 @@ package com.vogella.eclipse.mcp.core;
 import java.util.concurrent.Callable;
 
 /**
- * The bridge from a core tool to the UI thread, for work whose listeners assume it.
+ * A shared bridge for code outside the UI bundle when work must run on the UI
+ * thread because its listeners assume it.
  * <p>
  * The UI bundle registers an executor; without one the work runs inline, which is right headless.
  */

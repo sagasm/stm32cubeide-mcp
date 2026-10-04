@@ -37,7 +37,8 @@ class InstallBundleToolTest {
 	/** Deliberately outside this server's own name space, so no self guard fires. */
 	private static final String SYMBOL = "org.mcp.tests.installable";
 
-	private static final String OWN = "com.vogella.eclipse.mcp.core";
+	private static final List<String> OWN_BUNDLES = List.of("com.vogella.eclipse.mcp.core",
+			"com.vogella.eclipse.mcp.basic");
 
 	/** A real extension point of the test runtime, so the contribution has somewhere to land. */
 	private static final String POINT = "org.eclipse.core.runtime.products";
@@ -181,17 +182,20 @@ class InstallBundleToolTest {
 
 	@Test
 	void refusesToTouchItsOwnBundlesByDefault() throws Exception {
-		Bundle core = bundleOf(OWN);
-		assertNotNull(core, "this server's own core bundle should be installed in the test IDE");
-		String versionBefore = core.getVersion().toString();
-		Path patchedCore = jar(OWN, "9.9.9");
+		for (String symbolicName : OWN_BUNDLES) {
+			Bundle bundle = bundleOf(symbolicName);
+			assertNotNull(bundle, "this server bundle should be installed in the test IDE: " + symbolicName);
+			String versionBefore = bundle.getVersion().toString();
+			Path patchedBundle = jar(symbolicName, "9.9.9");
 
-		McpToolResult refused = TestFixture.call(TOOL, Map.of("jar", patchedCore.toString()));
+			McpToolResult refused = TestFixture.call(TOOL, Map.of("jar", patchedBundle.toString()));
 
-		assertTrue(refused.isError(), refused.text());
-		assertTrue(refused.text().contains(OWN), refused.text());
-		assertTrue(refused.text().contains("allowSelf"), refused.text());
-		assertEquals(versionBefore, core.getVersion().toString(), "nothing may be changed by the refusal");
+			assertTrue(refused.isError(), refused.text());
+			assertTrue(refused.text().contains(symbolicName), refused.text());
+			assertTrue(refused.text().contains("allowSelf"), refused.text());
+			assertEquals(versionBefore, bundle.getVersion().toString(),
+					"nothing may be changed by the refusal: " + symbolicName);
+		}
 	}
 
 	@Test
