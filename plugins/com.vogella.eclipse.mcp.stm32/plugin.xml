@@ -7,6 +7,8 @@
       <tool class="com.vogella.eclipse.mcp.stm32.internal.DebugControlTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.EvaluateTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.FramesTool"/>
+      <tool class="com.vogella.eclipse.mcp.stm32.internal.BreakpointsTool"/>
+      <tool class="com.vogella.eclipse.mcp.stm32.internal.ReadMemoryTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.DelegateCheckTool"/>
    </extension>
 </plugin>

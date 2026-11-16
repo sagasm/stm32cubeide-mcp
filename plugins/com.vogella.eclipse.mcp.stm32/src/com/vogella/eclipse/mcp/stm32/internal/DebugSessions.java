@@ -13,17 +13,24 @@ import org.eclipse.cdt.dsf.concurrent.ImmediateDataRequestMonitor;
 import org.eclipse.cdt.dsf.concurrent.ImmediateRequestMonitor;
 import org.eclipse.cdt.dsf.concurrent.Query;
 import org.eclipse.cdt.dsf.datamodel.IDMContext;
+import org.eclipse.cdt.dsf.debug.service.IBreakpoints;
 import org.eclipse.cdt.dsf.debug.service.IProcesses;
 import org.eclipse.cdt.dsf.debug.service.IRunControl;
 import org.eclipse.cdt.dsf.debug.service.IStack;
+import org.eclipse.cdt.dsf.debug.service.command.ICommand;
 import org.eclipse.cdt.dsf.debug.service.command.ICommandControlService;
 import org.eclipse.cdt.dsf.gdb.launching.GdbLaunch;
 import org.eclipse.cdt.dsf.mi.service.IMICommandControl;
 import org.eclipse.cdt.dsf.mi.service.IMIProcesses;
 import org.eclipse.cdt.dsf.mi.service.command.CommandFactory;
 import org.eclipse.cdt.dsf.mi.service.command.output.MIArg;
+import org.eclipse.cdt.dsf.mi.service.command.output.MIBreakInsertInfo;
+import org.eclipse.cdt.dsf.mi.service.command.output.MIBreakListInfo;
+import org.eclipse.cdt.dsf.mi.service.command.output.MIBreakpoint;
 import org.eclipse.cdt.dsf.mi.service.command.output.MIDataEvaluateExpressionInfo;
+import org.eclipse.cdt.dsf.mi.service.command.output.MIDataReadMemoryBytesInfo;
 import org.eclipse.cdt.dsf.mi.service.command.output.MIFrame;
+import org.eclipse.cdt.dsf.mi.service.command.output.MIInfo;
 import org.eclipse.cdt.dsf.mi.service.command.output.MIListThreadGroupsInfo;
 import org.eclipse.cdt.dsf.mi.service.command.output.MIStackListArgumentsInfo;
 import org.eclipse.cdt.dsf.mi.service.command.output.MIStackListLocalsInfo;
@@ -36,6 +43,7 @@ import org.eclipse.debug.core.ILaunch;
 import org.eclipse.debug.core.ILaunchManager;
 import org.eclipse.debug.core.ILaunchConfiguration;
 import org.eclipse.debug.core.model.IDebugTarget;
+import org.eclipse.debug.core.model.MemoryByte;
 import org.eclipse.debug.core.model.IStackFrame;
 import org.eclipse.debug.core.model.IThread;
 import org.osgi.framework.FrameworkUtil;
@@ -897,6 +905,248 @@ public final class DebugSessions {
 		one.put("value", safeText(arg::getValue));
 		one.put("kind", kind);
 		return one;
+	}
+
+	/**
+	 * Breakpoint CRUD over GDB/MI (-break-insert/-delete/-list/-condition/-enable/-disable).
+	 * Runs on the DSF executor and blocks briefly.
+	 */
+	public static JsonObject breakpointsDsf(GdbLaunch launch, String action, String location,
+			String condition, String ids, boolean temporary, boolean hardware, int ignoreCount)
+			throws CoreException {
+		DsfSession session = launch.getSession();
+		if (session == null || !session.isActive()) {
+			throw new CoreException(Status.error("The DSF session is not active."));
+		}
+		Query<JsonObject> query = new Query<>() {
+			@Override
+			protected void execute(DataRequestMonitor<JsonObject> rm) {
+				DsfServicesTracker tracker = servicesTracker(session);
+				ICommandControlService commandControl = tracker.getService(ICommandControlService.class);
+				IMICommandControl miCommandControl = tracker.getService(IMICommandControl.class);
+				tracker.dispose();
+				if (commandControl == null || miCommandControl == null) {
+					rm.setStatus(Status.error("DSF command control not available yet."));
+					rm.done();
+					return;
+				}
+				CommandFactory commandFactory = miCommandControl.getCommandFactory();
+				IDMContext controlContext = commandControl.getContext();
+				if (!(controlContext instanceof IBreakpoints.IBreakpointsTargetDMContext target)) {
+					rm.setStatus(Status.error("Command control context is not a breakpoints target: " + controlContext));
+					rm.done();
+					return;
+				}
+				JsonObject result = new JsonObject();
+				result.put("action", action);
+				switch (action) {
+					case "list" -> commandControl.queueCommand(commandFactory.createMIBreakList(target),
+							new ImmediateDataRequestMonitor<MIBreakListInfo>() {
+								@Override
+								protected void handleCompleted() {
+									MIBreakListInfo info = isSuccess() ? getData() : null;
+									MIBreakpoint[] bps = info != null ? info.getMIBreakpoints() : null;
+									JsonArray arr = new JsonArray();
+									if (bps != null) {
+										for (MIBreakpoint b : bps) {
+											arr.add(breakpointJson(b));
+										}
+									}
+									result.put("breakpoints", arr);
+									result.put("success", isSuccess());
+									rm.done(result);
+								}
+							});
+					case "set" -> {
+						if (location == null || location.isBlank()) {
+							rm.setStatus(Status.error("action=set requires 'location'."));
+							rm.done();
+							return;
+						}
+						commandControl.queueCommand(commandFactory.createMIBreakInsert(target,
+								temporary, hardware, condition, ignoreCount, location, "0"),
+								new ImmediateDataRequestMonitor<MIBreakInsertInfo>() {
+									@Override
+									protected void handleCompleted() {
+										MIBreakInsertInfo info = isSuccess() ? getData() : null;
+										MIBreakpoint[] bps = info != null ? info.getMIBreakpoints() : null;
+										JsonArray arr = new JsonArray();
+										if (bps != null) {
+											for (MIBreakpoint b : bps) {
+												arr.add(breakpointJson(b));
+											}
+										}
+										result.put("breakpoints", arr);
+										result.put("success", isSuccess());
+										if (!isSuccess() && getStatus() != null) {
+											result.put("error", getStatus().getMessage());
+										}
+										rm.done(result);
+									}
+								});
+					}
+					case "delete", "enable", "disable" -> {
+						if (ids == null || ids.isBlank()) {
+							rm.setStatus(Status.error("action=" + action + " requires 'ids' (comma separated breakpoints)."));
+							rm.done();
+							return;
+						}
+						String[] idArray = ids.split("[,\\s]+");
+						ICommand<MIInfo> command = switch (action) {
+							case "delete" -> commandFactory.createMIBreakDelete(target, idArray);
+							case "enable" -> commandFactory.createMIBreakEnable(target, idArray);
+							default -> commandFactory.createMIBreakDisable(target, idArray);
+						};
+						commandControl.queueCommand(command, new ImmediateDataRequestMonitor<MIInfo>() {
+							@Override
+							protected void handleCompleted() {
+								result.put("ids", ids);
+								result.put("success", isSuccess());
+								if (!isSuccess() && getStatus() != null) {
+									result.put("error", getStatus().getMessage());
+								}
+								rm.done(result);
+							}
+						});
+					}
+					case "condition" -> {
+						if (ids == null || ids.isBlank() || condition == null || condition.isBlank()) {
+							rm.setStatus(Status.error("action=condition requires 'ids' and 'condition'."));
+							rm.done();
+							return;
+						}
+						commandControl.queueCommand(commandFactory.createMIBreakCondition(target, ids, condition),
+								new ImmediateDataRequestMonitor<MIInfo>() {
+									@Override
+									protected void handleCompleted() {
+										result.put("id", ids);
+										result.put("condition", condition);
+										result.put("success", isSuccess());
+										if (!isSuccess() && getStatus() != null) {
+											result.put("error", getStatus().getMessage());
+										}
+										rm.done(result);
+									}
+								});
+					}
+					default -> {
+						rm.setStatus(Status.error("Unknown action '" + action
+								+ "'; use list/set/delete/enable/disable/condition."));
+						rm.done();
+					}
+				}
+			}
+		};
+		launch.getDsfExecutor().execute(query);
+		try {
+			return query.get(5, TimeUnit.SECONDS);
+		} catch (Exception e) {
+			throw new CoreException(Status.error("Breakpoint operation failed: " + e.getMessage()));
+		}
+	}
+
+	private static JsonObject breakpointJson(MIBreakpoint b) {
+		JsonObject o = new JsonObject();
+		o.put("id", safeText(b::getNumber));
+		o.put("type", safeText(b::getType));
+		o.put("enabled", b.isEnabled());
+		o.put("address", safeText(b::getAddress));
+		o.put("function", safeText(b::getFunction));
+		o.put("file", safeText(b::getFile));
+		o.put("line", b.getLine());
+		o.put("condition", safeText(b::getCondition));
+		o.put("ignoreCount", b.getIgnoreCount());
+		o.put("hitCount", b.getTimes());
+		o.put("pending", b.isPending());
+		return o;
+	}
+
+	/** Reads raw bytes from a target address via GDB/MI -data-read-memory-bytes. */
+	public static JsonObject readMemoryDsf(GdbLaunch launch, String address, long offset, int length)
+			throws CoreException {
+		final long base;
+		try {
+			base = address != null && (address.startsWith("0x") || address.startsWith("0X"))
+					? Long.parseUnsignedLong(address.substring(2), 16)
+					: Long.parseLong(address);
+		} catch (Exception e) {
+			throw new CoreException(Status.error("Invalid address '" + address + "': " + e.getMessage()));
+		}
+		DsfSession session = launch.getSession();
+		if (session == null || !session.isActive()) {
+			throw new CoreException(Status.error("The DSF session is not active."));
+		}
+		Query<JsonObject> query = new Query<>() {
+			@Override
+			protected void execute(DataRequestMonitor<JsonObject> rm) {
+				DsfServicesTracker tracker = servicesTracker(session);
+				ICommandControlService commandControl = tracker.getService(ICommandControlService.class);
+				IMICommandControl miCommandControl = tracker.getService(IMICommandControl.class);
+				tracker.dispose();
+				if (commandControl == null || miCommandControl == null) {
+					rm.setStatus(Status.error("DSF command control not available yet."));
+					rm.done();
+					return;
+				}
+				CommandFactory commandFactory = miCommandControl.getCommandFactory();
+				commandControl.queueCommand(
+						commandFactory.createMIDataReadMemoryBytes(commandControl.getContext(), address, offset, length),
+						new ImmediateDataRequestMonitor<MIDataReadMemoryBytesInfo>() {
+							@Override
+							protected void handleCompleted() {
+								MIDataReadMemoryBytesInfo info = isSuccess() ? getData() : null;
+								MemoryByte[] bytes = info != null ? info.getMIMemoryBlock() : null;
+								JsonObject result = new JsonObject();
+								result.put("address", address);
+								result.put("offset", offset);
+								result.put("length", length);
+								result.put("success", isSuccess());
+								JsonArray hex = new JsonArray();
+								StringBuilder ascii = new StringBuilder();
+								StringBuilder dump = new StringBuilder();
+								if (bytes != null) {
+									for (int i = 0; i < bytes.length; i++) {
+										int v = bytes[i].getValue() & 0xFF;
+										hex.add(String.format("%02x", v));
+										ascii.append(v >= 0x20 && v < 0x7f ? (char) v : '.');
+										if (i % 16 == 0) {
+											if (i > 0) {
+												dump.append('\n');
+											}
+											dump.append(String.format("%08x  ", base + offset + i));
+										}
+										dump.append(String.format("%02x ", v));
+										if (i % 16 == 15 || i == bytes.length - 1) {
+											int lastInRow = i % 16;
+											for (int p = lastInRow; p < 15; p++) {
+												dump.append("   ");
+											}
+											dump.append(" |");
+											for (int j = i - lastInRow; j <= i; j++) {
+												int bv = bytes[j].getValue() & 0xFF;
+												dump.append(bv >= 0x20 && bv < 0x7f ? (char) bv : '.');
+											}
+											dump.append('|');
+										}
+									}
+								}
+								result.put("bytes", hex);
+								result.put("ascii", ascii.toString());
+								result.put("hexdump", dump.toString());
+								if (!isSuccess() && getStatus() != null) {
+									result.put("error", getStatus().getMessage());
+								}
+								rm.done(result);
+							}
+						});
+			}
+		};
+		launch.getDsfExecutor().execute(query);
+		try {
+			return query.get(5, TimeUnit.SECONDS);
+		} catch (Exception e) {
+			throw new CoreException(Status.error("Reading memory failed: " + e.getMessage()));
+		}
 	}
 
 	private interface TextSupplier {
