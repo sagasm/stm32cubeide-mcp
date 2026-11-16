@@ -25,6 +25,7 @@ Import-Package: com.networknt.schema;version="[3.0,4)",
  org.eclipse.jetty.util.thread;version="[12.1.12,13)",
  org.eclipse.osgi.service.datalocation;version="1.4.0",
  org.osgi.framework;version="[1.10,2)",
+ org.osgi.framework.wiring;version="[1.2,2)",
  tools.jackson.databind;version="[3.0,4)",
  tools.jackson.databind.json;version="[3.0,4)"
 Export-Package: com.vogella.eclipse.mcp.server,
