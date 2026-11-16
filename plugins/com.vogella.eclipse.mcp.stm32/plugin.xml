@@ -5,6 +5,7 @@
       <tool class="com.vogella.eclipse.mcp.stm32.internal.ListLaunchConfigurationsTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.DebugLaunchTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.DebugControlTool"/>
+      <tool class="com.vogella.eclipse.mcp.stm32.internal.EvaluateTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.DelegateCheckTool"/>
    </extension>
 </plugin>

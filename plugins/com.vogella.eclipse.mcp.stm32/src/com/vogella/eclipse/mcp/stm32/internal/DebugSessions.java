@@ -21,6 +21,7 @@ import org.eclipse.cdt.dsf.gdb.launching.GdbLaunch;
 import org.eclipse.cdt.dsf.mi.service.IMICommandControl;
 import org.eclipse.cdt.dsf.mi.service.IMIProcesses;
 import org.eclipse.cdt.dsf.mi.service.command.CommandFactory;
+import org.eclipse.cdt.dsf.mi.service.command.output.MIDataEvaluateExpressionInfo;
 import org.eclipse.cdt.dsf.mi.service.command.output.MIListThreadGroupsInfo;
 import org.eclipse.cdt.dsf.service.DsfServicesTracker;
 import org.eclipse.cdt.dsf.service.DsfSession;
@@ -541,6 +542,142 @@ public final class DebugSessions {
 			rm.done();
 		}
 		}
+	}
+
+	/**
+	 * Evaluates a C/ST expression in the top frame of a suspended DSF thread via
+	 * MI -data-evaluate-expression. Runs on the DSF executor and blocks briefly.
+	 */
+	public static JsonObject evaluateDsf(GdbLaunch launch, String expression, int threadIndex) throws CoreException {
+		if (expression == null || expression.isBlank()) {
+			throw new CoreException(Status.error("The 'expression' argument must not be empty."));
+		}
+		DsfSession session = launch.getSession();
+		if (session == null || !session.isActive()) {
+			throw new CoreException(Status.error("The DSF session is not active."));
+		}
+		Query<JsonObject> query = new Query<>() {
+			@Override
+			protected void execute(DataRequestMonitor<JsonObject> rm) {
+				DsfServicesTracker tracker = servicesTracker(session);
+				IProcesses processes = tracker.getService(IProcesses.class);
+				IRunControl runControl = tracker.getService(IRunControl.class);
+				IStack stack = tracker.getService(IStack.class);
+				ICommandControlService commandControl = tracker.getService(ICommandControlService.class);
+				IMICommandControl miCommandControl = tracker.getService(IMICommandControl.class);
+				CommandFactory commandFactory = miCommandControl != null ? miCommandControl.getCommandFactory()
+						: new CommandFactory();
+				IMIProcesses miProcesses = tracker.getService(IMIProcesses.class);
+				tracker.dispose();
+				if (processes == null || runControl == null || stack == null || commandControl == null
+						|| miProcesses == null) {
+					rm.setStatus(Status.error("DSF services not available yet."));
+					rm.done();
+					return;
+				}
+				commandControl.queueCommand(commandFactory.createMIListThreadGroups(commandControl.getContext()),
+						new ImmediateDataRequestMonitor<MIListThreadGroupsInfo>() {
+							@Override
+							protected void handleCompleted() {
+								MIListThreadGroupsInfo info = getData();
+								String groupId = info != null && info.getGroupList() != null
+										&& info.getGroupList().length > 0
+												? info.getGroupList()[0].getGroupId()
+												: null;
+								if (groupId == null) {
+									rm.setStatus(Status.error("gdb reports no thread-group to evaluate in."));
+									rm.done();
+									return;
+								}
+								IProcesses.IProcessDMContext procDmc = miProcesses
+										.createProcessContext(commandControl.getContext(), groupId);
+								IRunControl.IContainerDMContext containerDmc = miProcesses
+										.createContainerContext(procDmc, groupId);
+								processes.getProcessesBeingDebugged(containerDmc,
+										new ImmediateDataRequestMonitor<IDMContext[]>() {
+											@Override
+											protected void handleSuccess() {
+												List<IRunControl.IExecutionDMContext> execs = new ArrayList<>();
+												for (IDMContext ctx : getData()) {
+													if (ctx instanceof IRunControl.IExecutionDMContext exec) {
+														execs.add(exec);
+													}
+												}
+												if (execs.isEmpty()) {
+													rm.setStatus(Status.error("No execution context to evaluate in."));
+													rm.done();
+													return;
+												}
+												IRunControl.IExecutionDMContext exec = execs
+														.get(Math.min(threadIndex, execs.size() - 1));
+												evaluateInFrame(stack, commandControl, commandFactory, exec,
+														expression, rm);
+											}
+
+											@Override
+											protected void handleFailure() {
+												rm.setStatus(getStatus());
+												rm.done();
+											}
+										});
+							}
+						});
+			}
+		};
+		launch.getDsfExecutor().execute(query);
+		try {
+			return query.get(3, TimeUnit.SECONDS);
+		} catch (Exception e) {
+			throw new CoreException(Status.error("Evaluating the expression failed: " + e.getMessage()));
+		}
+	}
+
+	/** Issues -data-evaluate-expression on a resolved frame and builds the result JSON. */
+	private static void evaluateInFrame(IStack stack, ICommandControlService commandControl,
+			CommandFactory commandFactory, IRunControl.IExecutionDMContext exec, String expression,
+			DataRequestMonitor<JsonObject> rm) {
+		stack.getTopFrame(exec,
+				new ImmediateDataRequestMonitor<IStack.IFrameDMContext>() {
+					@Override
+					protected void handleSuccess() {
+						IStack.IFrameDMContext top = getData();
+						commandControl.queueCommand(
+								commandFactory.createMIDataEvaluateExpression(top, expression),
+								new ImmediateDataRequestMonitor<MIDataEvaluateExpressionInfo>() {
+									@Override
+									protected void handleCompleted() {
+										MIDataEvaluateExpressionInfo info = getData();
+										boolean ok = getStatus() != null && getStatus().isOK();
+										JsonObject result = new JsonObject();
+										result.put("expression", expression);
+										result.put("value", info != null ? safeText(info::getValue) : "");
+										result.put("success", ok);
+										if (!ok) {
+											result.put("error", getStatus() != null ? getStatus().getMessage() : "evaluate failed");
+										}
+										stack.getFrameData(top,
+												new ImmediateDataRequestMonitor<IStack.IFrameDMData>() {
+													@Override
+													protected void handleCompleted() {
+														IStack.IFrameDMData data = getData();
+														if (data != null) {
+															result.put("function", safeText(data::getFunction));
+															result.put("file", safeText(data::getFile));
+															result.put("line", data.getLine());
+														}
+														rm.done(result);
+													}
+												});
+									}
+								});
+					}
+
+					@Override
+					protected void handleFailure() {
+						rm.setStatus(getStatus());
+						rm.done();
+					}
+				});
 	}
 
 	private interface TextSupplier {
