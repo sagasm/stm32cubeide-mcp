@@ -34,7 +34,7 @@ public final class TokenStore {
 	 * A workspace scoped token would give every workspace a different secret behind one port,
 	 * and it is a plain file because preference files are world readable.
 	 */
-	static Path location() {
+	public static Path location() {
 		// otherwise a test regenerating the token replaces the one the developer's own IDE serves
 		String override = System.getProperty(DIRECTORY_PROPERTY);
 		if (override != null && !override.isBlank()) {

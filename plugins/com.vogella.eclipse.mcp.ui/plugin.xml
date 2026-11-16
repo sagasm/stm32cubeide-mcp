@@ -1,74 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <?eclipse version="3.4"?>
 <plugin>
-
-   <extension point="com.vogella.eclipse.mcp.core.tools">
-      <tool class="com.vogella.eclipse.mcp.ui.internal.GetEditorContextTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.LayoutTools$SetShellBounds"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.LayoutTools$SetPartState"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.WidgetTools$GetWidgetTree"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.WidgetTools$InspectWidget"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.WidgetTools$SelectTab"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.WidgetTools$ExpandRow"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.WidgetTools$Click"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ComboListTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.DragTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.SetWidgetTextTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.PressWidgetTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ScrollTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.SetSashTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.WaitUntilSettledTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.WaitForTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.PauseTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ApplyCssTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ThemeTools$ListThemes"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ThemeTools$SetTheme"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ThemeTools$RegisterTheme"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ThemeDefinitionTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.SamplingTools$Start"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.SamplingTools$Stop"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ShowTraceTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ScreenshotTools$ListTargets"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ScreenshotTools$Capture"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ScreencastTools$Start"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ScreencastTools$Stop"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.TextBoundsTools$TextBounds"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.TextBoundsTools$DoubleClickText"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.TextBoundsTools$ListAnnotations"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.KeyboardTools$TypeText"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.KeyboardTools$PressKey"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.SelectionTools$GetSelection"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.SelectionTools$SetSelection"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ContextMenuTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.SelectMenuItemTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.RestartTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ExitTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.DisplayInfoTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ClipboardTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.FocusTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.DismissDialogTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ResetDialogSettingsTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ViewTools$Show"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ViewTools$Hide"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.PerspectiveTools$ListPerspectives"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.PerspectiveTools$Switch"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.PerspectiveTools$Reset"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.MovePartTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.VisibilityTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.ModelVisibilityTool"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.EditorTools$ListEditors"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.EditorTools$CloseEditor"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.CommandTools$ListCommands"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.CommandTools$Run"/>
-      <tool class="com.vogella.eclipse.mcp.ui.internal.WindowTools"/>
-   </extension>
-
    <extension point="org.eclipse.ui.preferencePages">
-      <page id="com.vogella.eclipse.mcp.ui.preferences"
+      <page
+            id="com.vogella.eclipse.mcp.ui.preferences.McpServerPreferencePage"
             name="MCP Server"
             category="org.eclipse.ui.preferencePages.Workbench"
-            class="com.vogella.eclipse.mcp.ui.internal.McpPreferencePage">
+            class="com.vogella.eclipse.mcp.ui.preferences.McpServerPreferencePage">
       </page>
    </extension>
-
 </plugin>

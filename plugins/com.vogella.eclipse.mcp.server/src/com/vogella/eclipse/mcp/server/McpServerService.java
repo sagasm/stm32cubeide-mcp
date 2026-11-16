@@ -145,6 +145,11 @@ public final class McpServerService {
 		return EndpointFile.location();
 	}
 
+	/** The file the bearer token is stored in, whether or not the server is running. */
+	public static Path getTokenFile() {
+		return TokenStore.location();
+	}
+
 	/** The persisted bearer token, available whether or not the server is running. */
 	public static String getToken() {
 		return TokenStore.get();

@@ -4,7 +4,8 @@ Bundle-Name: Eclipse MCP Server
 Bundle-SymbolicName: com.vogella.eclipse.mcp.server;singleton:=true
 Bundle-Version: 3.2.0.qualifier
 Bundle-Vendor: vogella GmbH
-Bundle-RequiredExecutionEnvironment: JavaSE-25
+Bundle-RequiredExecutionEnvironment: JavaSE-21
+Provide-Capability: osgi.extender; osgi.extender="osgi.serviceloader.processor"; version:Version="1.0.0", osgi.extender; osgi.extender="osgi.serviceloader.registrar"; version:Version="1.0.0"
 Bundle-ActivationPolicy: lazy
 Automatic-Module-Name: com.vogella.eclipse.mcp.server
 Require-Bundle: org.eclipse.core.runtime;bundle-version="3.31.0",
