@@ -21,8 +21,12 @@ import org.eclipse.cdt.dsf.gdb.launching.GdbLaunch;
 import org.eclipse.cdt.dsf.mi.service.IMICommandControl;
 import org.eclipse.cdt.dsf.mi.service.IMIProcesses;
 import org.eclipse.cdt.dsf.mi.service.command.CommandFactory;
+import org.eclipse.cdt.dsf.mi.service.command.output.MIArg;
 import org.eclipse.cdt.dsf.mi.service.command.output.MIDataEvaluateExpressionInfo;
+import org.eclipse.cdt.dsf.mi.service.command.output.MIFrame;
 import org.eclipse.cdt.dsf.mi.service.command.output.MIListThreadGroupsInfo;
+import org.eclipse.cdt.dsf.mi.service.command.output.MIStackListArgumentsInfo;
+import org.eclipse.cdt.dsf.mi.service.command.output.MIStackListLocalsInfo;
 import org.eclipse.cdt.dsf.service.DsfServicesTracker;
 import org.eclipse.cdt.dsf.service.DsfSession;
 import org.eclipse.core.runtime.CoreException;
@@ -678,6 +682,221 @@ public final class DebugSessions {
 						rm.done();
 					}
 				});
+	}
+
+	/**
+	 * Reads the full call stack of a suspended DSF thread (function/file/line per
+	 * frame) and, optionally, each frame's locals and arguments. Runs on the DSF
+	 * executor and blocks briefly.
+	 */
+	public static JsonObject framesDsf(GdbLaunch launch, int threadIndex, boolean includeVariables, int maxFrames)
+			throws CoreException {
+		DsfSession session = launch.getSession();
+		if (session == null || !session.isActive()) {
+			throw new CoreException(Status.error("The DSF session is not active."));
+		}
+		Query<JsonObject> query = new Query<>() {
+			@Override
+			protected void execute(DataRequestMonitor<JsonObject> rm) {
+				DsfServicesTracker tracker = servicesTracker(session);
+				IProcesses processes = tracker.getService(IProcesses.class);
+				IRunControl runControl = tracker.getService(IRunControl.class);
+				IStack stack = tracker.getService(IStack.class);
+				ICommandControlService commandControl = tracker.getService(ICommandControlService.class);
+				IMICommandControl miCommandControl = tracker.getService(IMICommandControl.class);
+				CommandFactory commandFactory = miCommandControl != null ? miCommandControl.getCommandFactory()
+						: new CommandFactory();
+				IMIProcesses miProcesses = tracker.getService(IMIProcesses.class);
+				tracker.dispose();
+				if (processes == null || runControl == null || stack == null || commandControl == null
+						|| miProcesses == null) {
+					rm.setStatus(Status.error("DSF services not available yet."));
+					rm.done();
+					return;
+				}
+				commandControl.queueCommand(commandFactory.createMIListThreadGroups(commandControl.getContext()),
+						new ImmediateDataRequestMonitor<MIListThreadGroupsInfo>() {
+							@Override
+							protected void handleCompleted() {
+								MIListThreadGroupsInfo info = getData();
+								String groupId = info != null && info.getGroupList() != null
+										&& info.getGroupList().length > 0
+												? info.getGroupList()[0].getGroupId()
+												: null;
+								if (groupId == null) {
+									rm.setStatus(Status.error("gdb reports no thread-group to read frames from."));
+									rm.done();
+									return;
+								}
+								IProcesses.IProcessDMContext procDmc = miProcesses
+										.createProcessContext(commandControl.getContext(), groupId);
+								IRunControl.IContainerDMContext containerDmc = miProcesses
+										.createContainerContext(procDmc, groupId);
+								processes.getProcessesBeingDebugged(containerDmc,
+										new ImmediateDataRequestMonitor<IDMContext[]>() {
+											@Override
+											protected void handleSuccess() {
+												List<IRunControl.IExecutionDMContext> execs = new ArrayList<>();
+												for (IDMContext ctx : getData()) {
+													if (ctx instanceof IRunControl.IExecutionDMContext exec) {
+														execs.add(exec);
+													}
+												}
+												if (execs.isEmpty()) {
+													rm.setStatus(Status.error("No execution context to read frames from."));
+													rm.done();
+													return;
+												}
+												IRunControl.IExecutionDMContext exec = execs
+														.get(Math.min(threadIndex, execs.size() - 1));
+												collectFrames(stack, commandControl, commandFactory, exec,
+														includeVariables, maxFrames, rm);
+											}
+
+											@Override
+											protected void handleFailure() {
+												rm.setStatus(getStatus());
+												rm.done();
+											}
+										});
+							}
+						});
+			}
+		};
+		launch.getDsfExecutor().execute(query);
+		try {
+			return query.get(5, TimeUnit.SECONDS);
+		} catch (Exception e) {
+			throw new CoreException(Status.error("Reading the call stack failed: " + e.getMessage()));
+		}
+	}
+
+	/** Requests all frames, then each frame's data (and variables), converging via a pending counter. */
+	private static void collectFrames(IStack stack, ICommandControlService commandControl,
+			CommandFactory commandFactory, IRunControl.IExecutionDMContext exec, boolean includeVariables,
+			int maxFrames, DataRequestMonitor<JsonObject> rm) {
+		stack.getFrames(exec, 0, maxFrames <= 0 ? IStack.ALL_FRAMES : maxFrames,
+				new ImmediateDataRequestMonitor<IStack.IFrameDMContext[]>() {
+					@Override
+					protected void handleSuccess() {
+						IStack.IFrameDMContext[] frames = getData();
+						JsonObject result = new JsonObject();
+						result.put("thread", String.valueOf(exec));
+						// Keep frame objects in an ordered list; JsonArray has no get(int),
+						// so assemble the array only after all async reads complete.
+						List<JsonObject> slotList = new ArrayList<>();
+						for (int i = 0; i < frames.length; i++) {
+							slotList.add(new JsonObject());
+						}
+						AtomicInteger pending = new AtomicInteger(frames.length);
+						if (frames.length == 0) {
+							result.put("frames", new JsonArray());
+							result.put("total", 0);
+							rm.done(result);
+							return;
+						}
+						for (int i = 0; i < frames.length; i++) {
+							readFrame(stack, commandControl, commandFactory, frames[i], slotList.get(i),
+									includeVariables,
+									() -> {
+										if (pending.decrementAndGet() == 0) {
+											JsonArray arr = new JsonArray();
+											for (JsonObject f : slotList) {
+												arr.add(f);
+											}
+											result.put("frames", arr);
+											result.put("total", frames.length);
+											rm.done(result);
+										}
+									});
+						}
+					}
+
+					@Override
+					protected void handleFailure() {
+						rm.setStatus(getStatus());
+						rm.done();
+					}
+				});
+	}
+
+	/** Reads one frame's function/file/line and, optionally, locals + arguments via MI. */
+	private static void readFrame(IStack stack, ICommandControlService commandControl,
+			CommandFactory commandFactory, IStack.IFrameDMContext frame, JsonObject target,
+			boolean includeVariables, Runnable onDone) {
+		stack.getFrameData(frame, new ImmediateDataRequestMonitor<IStack.IFrameDMData>() {
+			@Override
+			protected void handleCompleted() {
+				IStack.IFrameDMData data = getData();
+				target.put("level", frame.getLevel());
+				if (data != null) {
+					target.put("function", safeText(data::getFunction));
+					target.put("file", safeText(data::getFile));
+					target.put("line", data.getLine());
+					target.put("module", safeText(data::getModule));
+				}
+				if (!includeVariables) {
+					onDone.run();
+					return;
+				}
+				JsonArray vars = new JsonArray();
+				target.put("variables", vars);
+				// IStack.getLocals/getArguments often come back empty on this DSF
+				// target; the Variables view uses MI -stack-list-locals/-arguments
+				// instead. Emit both, converge with a shared counter.
+				AtomicInteger varPending = new AtomicInteger(2);
+				commandControl.queueCommand(commandFactory.createMIStackListLocals(frame, true),
+						new ImmediateDataRequestMonitor<MIStackListLocalsInfo>() {
+							@Override
+							protected void handleCompleted() {
+								MIStackListLocalsInfo info = isSuccess() ? getData() : null;
+								MIArg[] locals = info != null ? info.getLocals() : null;
+								if (locals != null) {
+									for (MIArg a : locals) {
+										vars.add(varJson(a, "local"));
+									}
+								}
+								if (varPending.decrementAndGet() == 0) {
+									onDone.run();
+								}
+							}
+						});
+				commandControl.queueCommand(commandFactory.createMIStackListArguments(frame, true),
+						new ImmediateDataRequestMonitor<MIStackListArgumentsInfo>() {
+							@Override
+							protected void handleCompleted() {
+								MIStackListArgumentsInfo info = isSuccess() ? getData() : null;
+								MIFrame[] miFrames = info != null ? info.getMIFrames() : null;
+								if (miFrames != null) {
+									for (MIFrame mf : miFrames) {
+										MIArg[] args = mf.getArgs();
+										if (args != null) {
+											for (MIArg a : args) {
+												vars.add(varJson(a, "argument"));
+											}
+										}
+									}
+								}
+								if (varPending.decrementAndGet() == 0) {
+									onDone.run();
+								}
+							}
+						});
+			}
+
+			@Override
+			protected void handleFailure() {
+				onDone.run();
+			}
+		});
+	}
+
+	private static JsonObject varJson(MIArg arg, String kind) {
+		JsonObject one = new JsonObject();
+		one.put("name", safeText(arg::getName));
+		one.put("value", safeText(arg::getValue));
+		one.put("kind", kind);
+		return one;
 	}
 
 	private interface TextSupplier {
