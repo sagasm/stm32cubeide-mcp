@@ -40,8 +40,16 @@ public final class ResolvePathTool implements IMcpTool {
 				  "type": "object",
 				  "required": ["of"],
 				  "properties": {
-				    "of": {"type":"array","minItems":1,"maxItems":200,"items":{"type":"string"},
-				           "description":"Project names, workspace paths such as /my.project/src/Example.java, or absolute filesystem paths. Mixed freely; each entry is classified on its own."}
+				    "of": {
+				      "oneOf": [
+				        {"type":"string","minLength":1,"description":"A single project name, workspace path or absolute path."},
+				        {"type":"array","minItems":1,"maxItems":200,"items":{"type":"string"},
+				         "description":"Project names, workspace paths such as /my.project/src/Example.java, or absolute filesystem paths. Mixed freely; each entry is classified on its own."}
+				      ],
+				      "description":"One name/path or a list of them; each entry is classified on its own."
+				    },
+				    "nearby": {"type":"integer","default":10,"minimum":0,"maximum":200,
+				               "description":"Maximum number of project-name suggestions returned when an entry cannot be resolved."}
 				  },
 				  "additionalProperties": false
 				}"""; //$NON-NLS-1$
@@ -50,13 +58,19 @@ public final class ResolvePathTool implements IMcpTool {
 	@Override
 	public McpToolResult call(Map<String, Object> arguments, IProgressMonitor monitor) {
 		Object raw = arguments == null ? null : arguments.get("of"); //$NON-NLS-1$
-		if (!(raw instanceof List<?> requested) || requested.isEmpty()) {
-			return McpToolResult.error("The argument 'of' is required and must be a non-empty array of names or paths."); //$NON-NLS-1$
+		List<?> requested;
+		if (raw instanceof String single) {
+			requested = List.of(single);
+		} else if (raw instanceof List<?> list && !list.isEmpty()) {
+			requested = list;
+		} else {
+			return McpToolResult.error("The argument 'of' is required: one name/path string or a non-empty array of them."); //$NON-NLS-1$
 		}
+		int nearbyCount = arguments == null ? 10 : clampedNearby(arguments.get("nearby")); //$NON-NLS-1$
 		JsonArray resolved = new JsonArray();
 		for (Object entry : requested) {
 			if (entry != null) {
-				resolved.add(resolve(String.valueOf(entry).strip()));
+				resolved.add(resolve(String.valueOf(entry).strip(), nearbyCount));
 			}
 		}
 		return McpToolResult.of(new JsonObject().put("resolved", resolved) //$NON-NLS-1$
@@ -64,10 +78,20 @@ public final class ResolvePathTool implements IMcpTool {
 				.toString());
 	}
 
-	private static JsonObject resolve(String query) {
+	private static int clampedNearby(Object value) {
+		if (value instanceof Number number) {
+			return Math.max(0, Math.min(200, number.intValue()));
+		}
+		return 10;
+	}
+
+	private static JsonObject resolve(String query, int nearbyCount) {
 		JsonObject json = new JsonObject().put("query", query); //$NON-NLS-1$
 		if (query.isEmpty()) {
-			return json.put("resolved", Boolean.FALSE).put("reason", "Empty entry."); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+			return json.put("resolved", Boolean.FALSE) //$NON-NLS-1$
+					.put("reason", "Empty entry.") //$NON-NLS-1$
+					.put("repositoryRoot", null) //$NON-NLS-1$
+					.put("pathInRepository", null); //$NON-NLS-1$
 		}
 		IResource resource = asWorkspacePath(query);
 		if (resource == null) {
@@ -79,7 +103,7 @@ public final class ResolvePathTool implements IMcpTool {
 			if (!onDisk.isAbsolute()) {
 				return json.put("resolved", Boolean.FALSE) //$NON-NLS-1$
 						.put("reason", "No project, workspace path or absolute path named '%s'.".formatted(query)) //$NON-NLS-1$ //$NON-NLS-2$
-						.put("nearby", nearbyProjects(query)); //$NON-NLS-1$
+						.put("nearby", nearbyProjects(query, nearbyCount)); //$NON-NLS-1$
 			}
 			resource = forLocation(onDisk);
 		}
@@ -104,20 +128,29 @@ public final class ResolvePathTool implements IMcpTool {
 		return withRepository(json, onDisk);
 	}
 
-	/** A path of the form /project/... when its first segment names a project. */
+	/**
+	 * A workspace path /project/... when its first segment names a project.
+	 * The leading slash is optional: "kz036/Core/Src/main.c" resolves the same
+	 * way as "/kz036/Core/Src/main.c", because the first segment decides.
+	 */
 	private static IResource asWorkspacePath(String query) {
-		if (!query.startsWith("/")) { //$NON-NLS-1$
-			return null;
+		if (query.startsWith("/")) { //$NON-NLS-1$
+			query = query.substring(1);
 		}
 		IPath path = new Path(query);
 		if (path.segmentCount() == 0) {
+			return null;
+		}
+		// An absolute filesystem path (Windows drive letter) is for forLocation.
+		if (path.isAbsolute() || path.getDevice() != null) {
 			return null;
 		}
 		IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(path.segment(0));
 		if (!project.exists()) {
 			return null;
 		}
-		return path.segmentCount() == 1 ? project : ResourcesPlugin.getWorkspace().getRoot().findMember(path);
+		IPath fullPath = new Path("/").append(path); //$NON-NLS-1$
+		return path.segmentCount() == 1 ? project : ResourcesPlugin.getWorkspace().getRoot().findMember(fullPath);
 	}
 
 	private static IResource asProjectName(String query) {
@@ -154,16 +187,50 @@ public final class ResolvePathTool implements IMcpTool {
 		return best;
 	}
 
-	/** Project names containing the query, so a near miss says what was meant. */
-	private static JsonArray nearbyProjects(String query) {
+	/**
+	 * Project names close to the query: first plain substrings, then subsequence
+	 * matches as a fuzzier fallback (e.g. "kz36" for "kz036"), up to the
+	 * requested number of suggestions.
+	 */
+	private static JsonArray nearbyProjects(String query, int limit) {
 		JsonArray nearby = new JsonArray();
+		if (limit <= 0) {
+			return nearby;
+		}
 		String needle = query.toLowerCase(Locale.ROOT);
-		for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects()) {
-			if (nearby.size() < 10 && project.getName().toLowerCase(Locale.ROOT).contains(needle)) {
-				nearby.add(project.getName());
+		String[] all = java.util.Arrays.stream(ResourcesPlugin.getWorkspace().getRoot().getProjects())
+				.map(IProject::getName).toArray(String[]::new);
+		java.util.Set<String> picked = new java.util.HashSet<>();
+		for (String name : all) {
+			if (nearby.size() >= limit) {
+				break;
+			}
+			if (name.toLowerCase(Locale.ROOT).contains(needle)) {
+				nearby.add(name);
+				picked.add(name);
+			}
+		}
+		if (nearby.size() < limit) {
+			for (String name : all) {
+				if (nearby.size() >= limit) {
+					break;
+				}
+				if (!picked.contains(name) && isSubsequence(needle, name.toLowerCase(Locale.ROOT))) {
+					nearby.add(name);
+				}
 			}
 		}
 		return nearby;
+	}
+
+	private static boolean isSubsequence(String needle, String haystack) {
+		int at = 0;
+		for (int i = 0; i < haystack.length() && at < needle.length(); i++) {
+			if (haystack.charAt(i) == needle.charAt(at)) {
+				at++;
+			}
+		}
+		return at == needle.length();
 	}
 
 	/**
