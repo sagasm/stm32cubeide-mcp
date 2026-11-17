@@ -66,6 +66,16 @@ class RunScriptToolTest {
 			assertTrue(String.valueOf(steps.get(2).get("reason")).contains("budget"), "got " + steps.get(2));
 			assertEquals(Boolean.TRUE, result.get("budgetExhausted"), "got " + result);
 			assertEquals(Boolean.TRUE, result.get("stoppedEarly"), "got " + result);
+			Map<String, Object> cursor = (Map<String, Object>) result.get("cursor");
+			assertNotNull(cursor, "a budget exhaustion must carry a resume cursor, got " + result);
+			assertEquals(Integer.valueOf(2), cursor.get("resumeFromStep"),
+					"the first step that never started is where to resume, got " + cursor);
+			List<Map<String, Object>> resumeSteps = (List<Map<String, Object>>) cursor.get("resumeSteps");
+			assertNotNull(resumeSteps, "the cursor carries ready-to-reuse steps, got " + cursor);
+			assertEquals(1, resumeSteps.size(), "only the unstarted step is in the cursor, got " + resumeSteps);
+			assertEquals("third", resumeSteps.get(0).get("label"), "got " + resumeSteps);
+			assertTrue(String.valueOf(cursor.get("hint")).contains("must not be repeated"),
+					"the hint must warn against repeating earlier steps, got " + cursor);
 		} finally {
 			InstanceScope.INSTANCE.getNode(qualifier).remove(key);
 		}
@@ -117,6 +127,48 @@ class RunScriptToolTest {
 		assertEquals("total", failures.get(0).get("path"), "the failing path has to be named, got " + failures);
 		assertNotNull(failures.get(0).get("found"), "and what was there instead, got " + failures);
 		assertEquals(Boolean.FALSE, steps.get(1).get("ran"), "a later step must not run after a failure");
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void aFailedExpectationReportsTheActualValueAsStructuredJson() throws Exception {
+		// the caller must not have to parse a number or object that was flattened to a string
+		Map<String, Object> result = TestFixture.callAndParse(TOOL, Map.of("steps", List.of(
+				Map.of("tool", "eclipse_list_projects", "label", "wrong total",
+						"expect", Map.of("total", Integer.valueOf(-1))))));
+
+		List<Map<String, Object>> steps = (List<Map<String, Object>>) result.get("steps");
+		List<Map<String, Object>> failures = (List<Map<String, Object>>) steps.get(0).get("expectationsFailed");
+		assertEquals("number", failures.get(0).get("foundType"), "got " + failures);
+		assertTrue(failures.get(0).get("found") instanceof Number,
+				"the total is a number, not a stringified one: " + failures.get(0).get("found"));
+		assertEquals(Integer.valueOf(-1), Integer.valueOf(String.valueOf(failures.get(0).get("expected"))));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void aFailedExpectationKeepsTheCompletedStepsAndRollbackHint() throws Exception {
+		Map<String, Object> result = TestFixture.callAndParse(TOOL, Map.of("steps", List.of(
+				Map.of("tool", "eclipse_list_projects", "label", "ok step"),
+				Map.of("tool", "eclipse_list_projects", "label", "failing step",
+						"expect", Map.of("total", Integer.valueOf(-1))),
+				Map.of("tool", "eclipse_list_projects", "label", "never runs"))));
+
+		assertEquals(Integer.valueOf(1), result.get("passed"));
+		assertEquals(Integer.valueOf(1), result.get("failed"));
+		Map<String, Object> recovery = (Map<String, Object>) result.get("recovery");
+		assertNotNull(recovery, "a failed script must carry a recovery block, got " + result);
+		List<Map<String, Object>> completed = (List<Map<String, Object>>) recovery.get("completedSteps");
+		assertEquals(1, completed.size(), "the step that passed is kept, got " + completed);
+		assertEquals("ok step", completed.get(0).get("label"));
+		assertEquals(Integer.valueOf(1), recovery.get("failedAtIndex"));
+		assertEquals(Integer.valueOf(2), recovery.get("resumeFromStep"),
+				"the first step that did not run is the resume point");
+		assertTrue(String.valueOf(recovery.get("rollbackNote")).contains("NOT undone"),
+				"the hint must warn that effects are not undone, got " + recovery);
+		List<Map<String, Object>> steps = (List<Map<String, Object>>) result.get("steps");
+		assertEquals("ok step", steps.get(0).get("label"), "earlier results stay in the report");
+		assertEquals(Boolean.TRUE, steps.get(0).get("ok"));
 	}
 
 	@Test

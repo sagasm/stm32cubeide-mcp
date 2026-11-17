@@ -35,7 +35,7 @@ public final class RunScriptTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Runs several tools in order and reports what each one answered, so a sequence is one call instead of several. DOES WHATEVER THE TOOLS IT IS GIVEN DO, so it is exactly as destructive as its steps. TWO THINGS IT BUYS. First, atomic true runs the whole batch inside ONE turn of the UI thread, which is the only way a transient state survives from one step to the next: a content assist popup, a hover or a drag can close as soon as the event loop runs between two ordinary calls, so 'open the proposals then read them' is what this exists for. NOTHING REPAINTS INSIDE THE BATCH EITHER: a widget the batch creates has correct bounds and has never painted, so anything reading the SCREEN rather than the widget sees what was there before. eclipse_screenshot handles that by painting the widget itself and reporting sameTurnCapture, but a whole-display capture cannot, and any tool added later that reads pixels has the same problem. Try the sequence without atomic first; transient state often does survive between two ordinary calls, and the answer is more faithful when it does. Second, each step may carry an expect block, which turns a sequence into a check that passes or fails rather than a transcript somebody has to read: this is what makes a scripted IDE test possible from outside. Steps run in order and stop at the first failure unless stopOnFailure is false or the step says continueOnError. A step whose expectations fail is reported with the path, what was expected and what was there. Arguments missing from a step's tool schema do not fail the step; they are listed under ignoredArguments, which usually means a typo. Do not put eclipse_restart in a script: it takes the IDE down and the remaining steps go with it."; //$NON-NLS-1$
+		return "Runs several tools in order and reports what each one answered, so a sequence is one call instead of several. DOES WHATEVER THE TOOLS IT IS GIVEN DO, so it is exactly as destructive as its steps. TWO THINGS IT BUYS. First, atomic true runs the whole batch inside ONE turn of the UI thread, which is the only way a transient state survives from one step to the next: a content assist popup, a hover or a drag can close as soon as the event loop runs between two ordinary calls, so 'open the proposals then read them' is what this exists for. NOTHING REPAINTS INSIDE THE BATCH EITHER: a widget the batch creates has correct bounds and has never painted, so anything reading the SCREEN rather than the widget sees what was there before. eclipse_screenshot handles that by painting the widget itself and reporting sameTurnCapture, but a whole-display capture cannot, and any tool added later that reads pixels has the same problem. Try the sequence without atomic first; transient state often does survive between two ordinary calls, and the answer is more faithful when it does. Second, each step may carry an expect block, which turns a sequence into a check that passes or fails rather than a transcript somebody has to read: this is what makes a scripted IDE test possible from outside. Steps run in order and stop at the first failure unless stopOnFailure is false or the step says continueOnError. A step whose expectations fail is reported with the path, what was expected and the actual value under found (a real object, array or number, with foundType to name its JSON type). When a step fails or the budget runs out, the answer keeps the results of every step that did run under steps and adds a recovery block listing completedSteps, the index of the first failure and where to resume; the effects of steps that already ran are never undone, so inspect and reverse them yourself. If the budget ran out, a cursor carries resumeFromStep and ready-to-reuse resumeSteps: submit a new script with those steps to continue without repeating the ones that ran. Arguments missing from a step's tool schema do not fail the step; they are listed under ignoredArguments, which usually means a typo. Do not put eclipse_restart in a script: it takes the IDE down and the remaining steps go with it."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -98,8 +98,8 @@ public final class RunScriptTool implements IMcpTool {
 		try {
 			List<McpToolResult.Image> images = new ArrayList<>();
 			JsonObject report = atomic
-					? UiDispatch.call(() -> run(steps, stopOnFailure, true, images, monitor), CallBudget.maxWaitSeconds())
-					: run(steps, stopOnFailure, false, images, monitor);
+					? UiDispatch.call(() -> run(steps, raw, stopOnFailure, true, images, monitor), CallBudget.maxWaitSeconds())
+					: run(steps, raw, stopOnFailure, false, images, monitor);
 			return new McpToolResult(report.toString(), false, images);
 		} catch (Exception e) {
 			return McpToolResult.error("The script could not be run: " + e); //$NON-NLS-1$
@@ -115,25 +115,36 @@ public final class RunScriptTool implements IMcpTool {
 			boolean continueOnError) {
 	}
 
-	private static JsonObject run(List<Step> steps, boolean stopOnFailure, boolean atomic,
+	private static JsonObject run(List<Step> steps, List<?> rawSteps, boolean stopOnFailure, boolean atomic,
 			List<McpToolResult.Image> images, IProgressMonitor monitor) {
 		JsonArray results = new JsonArray();
 		int passed = 0;
 		int failed = 0;
 		boolean stopped = false;
 		boolean outOfBudget = false;
+		int firstFailureIndex = -1;
+		int resumeIndex = -1;
+		String failedLabel = null;
+		List<JsonObject> completed = new ArrayList<>();
 		// every step bounds its own wait, but three bounded waits in a row still
 		// outlast the call, and a script the server aborted answers nothing at all
 		int budgetSeconds = CallBudget.maxWaitSeconds();
 		long deadline = System.currentTimeMillis() + budgetSeconds * 1000L;
-		for (Step step : steps) {
+		for (int index = 0; index < steps.size(); index++) {
+			Step step = steps.get(index);
 			if (stopped) {
+				if (resumeIndex < 0) {
+					resumeIndex = index;
+				}
 				results.add(new JsonObject().put("label", step.label()).put("tool", step.tool().getName()) //$NON-NLS-1$ //$NON-NLS-2$
 						.put("ran", Boolean.FALSE).put("reason", "An earlier step failed.")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 				continue;
 			}
 			if (System.currentTimeMillis() >= deadline || (monitor != null && monitor.isCanceled())) {
 				outOfBudget = true;
+				if (resumeIndex < 0) {
+					resumeIndex = index;
+				}
 				results.add(new JsonObject().put("label", step.label()).put("tool", step.tool().getName()) //$NON-NLS-1$ //$NON-NLS-2$
 						.put("ran", Boolean.FALSE).put("reason", //$NON-NLS-1$ //$NON-NLS-2$
 								"The script's budget of %d seconds ran out before this step." //$NON-NLS-1$
@@ -176,22 +187,45 @@ public final class RunScriptTool implements IMcpTool {
 			results.add(entry);
 			if (ok) {
 				passed++;
+				completed.add(new JsonObject().put("index", Integer.valueOf(index)) //$NON-NLS-1$
+						.put("label", step.label()).put("tool", step.tool().getName())); //$NON-NLS-1$ //$NON-NLS-2$
 			} else {
 				failed++;
+				if (firstFailureIndex < 0) {
+					firstFailureIndex = index;
+					failedLabel = step.label();
+				}
 				if (stopOnFailure && !step.continueOnError()) {
 					stopped = true;
 				}
 			}
 		}
+		JsonArray completedArray = new JsonArray();
+		completed.forEach(completedArray::add);
+		boolean needsRecovery = failed > 0 || stopped || outOfBudget;
+		JsonObject recovery = !needsRecovery ? null : new JsonObject()
+				.put("completedSteps", completedArray) //$NON-NLS-1$
+				.put("completedCount", Integer.valueOf(passed)) //$NON-NLS-1$
+				.put("failedAtIndex", firstFailureIndex < 0 ? null : Integer.valueOf(firstFailureIndex)) //$NON-NLS-1$
+				.put("failedAtLabel", failedLabel) //$NON-NLS-1$
+				.put("resumeFromStep", resumeIndex < 0 ? null : Integer.valueOf(resumeIndex)) //$NON-NLS-1$
+				.put("rollbackNote", "The steps in completedSteps ran and their effects were NOT undone by this tool: inspect and reverse them yourself if the batch is being abandoned. A failed step also ran, so check its effects before repeating it. Resume the unfinished steps from resumeFromStep."); //$NON-NLS-1$
+		JsonObject cursor = !outOfBudget || resumeIndex < 0 ? null : new JsonObject()
+				.put("resumeFromStep", Integer.valueOf(resumeIndex)) //$NON-NLS-1$
+				.put("resumeSteps", new JsonRaw(Json.write(toJsonValue(rawSteps.subList(resumeIndex, rawSteps.size()))))) //$NON-NLS-1$
+				.put("hint", "The budget ran out before step %d. Submit a new eclipse_run_script with these resumeSteps as its 'steps'; the earlier ones already ran and must not be repeated." //$NON-NLS-1$
+						.formatted(Integer.valueOf(resumeIndex))); //$NON-NLS-1$
 		return new JsonObject().put("total", Integer.valueOf(steps.size())) //$NON-NLS-1$
 				.put("passed", Integer.valueOf(passed)) //$NON-NLS-1$
 				.put("failed", Integer.valueOf(failed)) //$NON-NLS-1$
 				.put("stoppedEarly", Boolean.valueOf(stopped || outOfBudget)) //$NON-NLS-1$
 				.put("budgetExhausted", outOfBudget ? Boolean.TRUE : null) //$NON-NLS-1$
 				.put("budgetNote", !outOfBudget ? null //$NON-NLS-1$
-						: "The steps ran for longer than the %d seconds that fit inside the server's %d second tool call timeout, so the remaining ones were not started; run them in a second script." //$NON-NLS-1$
+						: "The steps ran for longer than the %d seconds that fit inside the server's %d second tool call timeout, so the remaining ones were not started; use the cursor to resume them." //$NON-NLS-1$
 								.formatted(Integer.valueOf(budgetSeconds), Integer.valueOf(CallBudget.callTimeoutSeconds())))
 				.put("atomic", Boolean.valueOf(atomic)) //$NON-NLS-1$
+				.put("recovery", recovery) //$NON-NLS-1$
+				.put("cursor", cursor) //$NON-NLS-1$
 				.put("steps", results) //$NON-NLS-1$
 				.put("note", atomic //$NON-NLS-1$
 						? "Every step ran in one turn of the UI thread, so nothing repainted or closed between them." //$NON-NLS-1$
@@ -236,7 +270,8 @@ public final class RunScriptTool implements IMcpTool {
 			if (failure != null) {
 				failures.add(new JsonObject().put("path", path) //$NON-NLS-1$
 						.put("expected", describe(entry.getValue())) //$NON-NLS-1$
-						.put("found", found == null ? null : String.valueOf(found)) //$NON-NLS-1$
+						.put("found", toJsonValue(found)) //$NON-NLS-1$
+						.put("foundType", typeOf(found)) //$NON-NLS-1$
 						.put("reason", failure)); //$NON-NLS-1$
 			}
 		}
@@ -295,6 +330,46 @@ public final class RunScriptTool implements IMcpTool {
 
 	private static String describe(Object matcher) {
 		return matcher == null ? null : String.valueOf(matcher);
+	}
+
+	/**
+	 * Turns a parsed answer value into the writer's own node types, so a failed
+	 * expectation reports a real object, array or number instead of a string the
+	 * caller has to parse a second time. Values that are already scalars pass
+	 * through; only the containers built by {@link Json#parse(String)} need wrapping.
+	 */
+	private static Object toJsonValue(Object value) {
+		if (value instanceof Map<?, ?> map) {
+			JsonObject object = new JsonObject();
+			map.forEach((key, item) -> object.put(String.valueOf(key), toJsonValue(item)));
+			return object;
+		}
+		if (value instanceof List<?> list) {
+			JsonArray array = new JsonArray();
+			list.forEach(item -> array.add(toJsonValue(item)));
+			return array;
+		}
+		return value;
+	}
+
+	/** The JSON type of a found value, so an absent path is told apart from a present null. */
+	private static String typeOf(Object value) {
+		if (value == null) {
+			return "null"; //$NON-NLS-1$
+		}
+		if (value instanceof Map<?, ?>) {
+			return "object"; //$NON-NLS-1$
+		}
+		if (value instanceof List<?>) {
+			return "array"; //$NON-NLS-1$
+		}
+		if (value instanceof Boolean) {
+			return "boolean"; //$NON-NLS-1$
+		}
+		if (value instanceof Number) {
+			return "number"; //$NON-NLS-1$
+		}
+		return "string"; //$NON-NLS-1$
 	}
 
 	/** {@code name[key=value]}, or {@code [key=value]} when the list is already at hand. */
