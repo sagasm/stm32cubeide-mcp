@@ -1,6 +1,7 @@
 package com.vogella.eclipse.mcp.cdt.internal;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -33,6 +34,10 @@ import com.vogella.eclipse.mcp.core.json.JsonObject;
 public final class CdtOutlineTool implements IMcpTool {
 
     private static final Set<String> KINDS = Set.of("function", "variable", "type", "macro", "other");
+
+    /** One outline entry plus the coordinate needed to detect macro-expansion collisions. */
+    private record Slot(com.vogella.eclipse.mcp.core.json.JsonObject node, String path, int offset, int line) {
+    }
 
     @Override
     public String getName() {
@@ -95,7 +100,7 @@ public final class CdtOutlineTool implements IMcpTool {
                     : "No accessible C/C++ projects found in the workspace.");
         }
 
-        JsonArray symbols = new JsonArray();
+        List<Slot> slots = new ArrayList<>();
         String matched = null;
         int total = 0;
         try {
@@ -140,7 +145,8 @@ public final class CdtOutlineTool implements IMcpTool {
                             node.put("fields", fields);
                         }
                     }
-                    symbols.add(node);
+                    slots.add(new Slot(node, CdtIndexHelper.locationPath(name), name.getNodeOffset(),
+                            CdtIndexHelper.locationLine(name)));
                     total++;
                 }
             } finally {
@@ -150,6 +156,27 @@ public final class CdtOutlineTool implements IMcpTool {
             return McpToolResult.error("Index query failed: " + e.getMessage());
         }
 
+        // The index places bindings produced by a macro expansion at the macro's
+        // call site, so several distinct symbols share one exact coordinate. Such
+        // a coordinate is an approximation, not a definition location: mark it so
+        // callers do not present it as precise, and name the macro on that line.
+        Map<String, Integer> byCoordinate = new HashMap<>();
+        for (Slot slot : slots) {
+            byCoordinate.merge(slot.path() + ":" + slot.offset(), Integer.valueOf(1),
+                    (a, b) -> Integer.valueOf(a.intValue() + b.intValue()));
+        }
+        JsonArray symbols = new JsonArray();
+        for (Slot slot : slots) {
+            Integer shared = byCoordinate.get(slot.path() + ":" + slot.offset());
+            if (shared != null && shared.intValue() > 1) {
+                String macro = CdtIndexHelper.macroAt(slot.path(), slot.offset());
+                slot.node().put("approximateLocation", Boolean.TRUE);
+                if (macro != null) {
+                    slot.node().put("fromMacro", macro);
+                }
+            }
+            symbols.add(slot.node());
+        }
         JsonObject result = new JsonObject()
                 .put("path", path)
                 .put("matchedPath", matched)

@@ -100,6 +100,8 @@ public final class RegenerateTool implements IMcpTool {
                     .put("confirmed", Boolean.valueOf(confirm)) //$NON-NLS-1$
                     .put("ioc", ioc.toString()) //$NON-NLS-1$
                     .put("fingerprint", fingerprint) //$NON-NLS-1$
+                    .put("gitCwd", root.toString()) //$NON-NLS-1$
+                    .put("gitRoot", gitRoot(root)) //$NON-NLS-1$
                     .put("gitStatus", gitStatus) //$NON-NLS-1$
                     .put("impactPaths", paths) //$NON-NLS-1$
                     .put("replaceDirs", replace) //$NON-NLS-1$
@@ -179,6 +181,21 @@ public final class RegenerateTool implements IMcpTool {
             result.append(String.format("%02x", Byte.valueOf(b))); //$NON-NLS-1$
         }
         return result.toString();
+    }
+
+    /** The repository toplevel git resolves from the ioc's directory, for diagnosing gitStatus. */
+    private static String gitRoot(Path root) {
+        try {
+            Process process = new ProcessBuilder("git", "rev-parse", "--show-toplevel") //$NON-NLS-1$ //$NON-NLS-2$
+                    .directory(root.toFile()).redirectErrorStream(true).start();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            return process.waitFor(5, TimeUnit.SECONDS) && process.exitValue() == 0 ? output : "unavailable"; //$NON-NLS-1$
+        } catch (IOException e) {
+            return "unavailable: " + e.getMessage(); //$NON-NLS-1$
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return "unavailable: interrupted"; //$NON-NLS-1$
+        }
     }
 
     private static String gitStatus(Path root) {

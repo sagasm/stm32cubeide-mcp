@@ -1,5 +1,7 @@
 package com.vogella.eclipse.mcp.stm32.internal;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import org.eclipse.core.resources.IFile;
@@ -33,7 +35,7 @@ public final class ListLaunchConfigurationsTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Lists the debug launch configurations of this workspace with their type, modes, project and .launch file. Use it to pick the configuration name before launching a debug session on an ST target. The typeFilter narrows the list to a substring of the launch type id; the default keeps the ST MCU debug configurations."; //$NON-NLS-1$
+		return "Lists the debug launch configurations of this workspace with their type, modes, project and .launch file. Use it to pick the configuration name before launching a debug session on an ST target. The typeFilter narrows the list to a substring of the launch type id; the default keeps the ST MCU debug configurations; project filters by the configuration's project. total counts the configurations that passed both filters, returned is how many are in the array, and truncated is true only when maxResults cut that filtered set short; totalBeforeFilter appears when the project filter removed some."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -58,34 +60,39 @@ public final class ListLaunchConfigurationsTool implements IMcpTool {
 		int maxResults = args.getInt("maxResults", 50, 1, 500);
 
 		ILaunchManager manager = DebugPlugin.getDefault().getLaunchManager();
-		JsonArray configurations = new JsonArray();
-		int reported = 0;
-		int total = 0;
+		List<JsonObject> all = new ArrayList<>();
+		int totalBeforeFilter = 0;
 		try {
 			for (ILaunchConfiguration configuration : manager.getLaunchConfigurations()) {
 				String type = configuration.getType().getIdentifier();
 				if (!type.toLowerCase().contains(typeFilter.toLowerCase())) {
 					continue;
 				}
-				total++;
-				if (reported >= maxResults) {
-					continue;
-				}
+				totalBeforeFilter++;
 				String configurationProject = configuration.getAttribute(PROJECT_ATTR, ""); //$NON-NLS-1$
 				if (project != null && !project.isBlank() && !project.equals(configurationProject)) {
 					continue;
 				}
-				configurations.add(describe(configuration, type, configurationProject));
-				reported++;
+				all.add(describe(configuration, type, configurationProject));
 			}
 		} catch (CoreException e) {
 			return McpToolResult.error("Could not read the launch configurations: " + e.getMessage());
 		}
 
+		int total = all.size();
+		int returned = Math.min(total, maxResults);
+		JsonArray configurations = new JsonArray();
+		for (int i = 0; i < returned; i++) {
+			configurations.add(all.get(i));
+		}
 		JsonObject result = new JsonObject()
-				.put("total", total)
-				.put("truncated", total > reported)
+				.put("total", Integer.valueOf(total))
+				.put("returned", Integer.valueOf(returned))
+				.put("truncated", Boolean.valueOf(total > returned))
 				.put("configurations", configurations);
+		if (totalBeforeFilter != total) {
+			result.put("totalBeforeFilter", Integer.valueOf(totalBeforeFilter));
+		}
 		return McpToolResult.of(result.toString());
 	}
 

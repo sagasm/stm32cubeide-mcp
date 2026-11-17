@@ -178,6 +178,33 @@ final class CdtIndexHelper {
         return line;
     }
 
+    /**
+     * Best-effort name of the macro invoked on the line containing an index
+     * offset. The CDT index places bindings produced by a macro expansion at the
+     * macro's call site, so several distinct symbols share one coordinate; this
+     * reads that source line and returns its leading upper-case identifier (the
+     * macro name) or null when the line has no such token.
+     */
+    static String macroAt(String path, int offset) {
+        String content = readText(path);
+        if (content == null || offset < 0 || offset > content.length()) {
+            return null;
+        }
+        int begin = content.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+        int end = content.indexOf('\n', begin);
+        if (end < 0) {
+            end = content.length();
+        }
+        String line = content.substring(begin, end).trim();
+        for (String token : line.split("[^A-Za-z0-9_]+")) { //$NON-NLS-1$
+            if (token.length() >= 2 && token.equals(token.toUpperCase(java.util.Locale.ROOT))
+                    && token.chars().allMatch(c -> Character.isUpperCase(c) || Character.isDigit(c) || c == '_')) {
+                return token;
+            }
+        }
+        return null;
+    }
+
     /** Reads a workspace or filesystem file as text, or null on failure. */
     static String readText(String path) {
         try {
