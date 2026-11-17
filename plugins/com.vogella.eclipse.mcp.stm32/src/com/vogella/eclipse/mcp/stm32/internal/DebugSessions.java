@@ -647,11 +647,19 @@ public final class DebugSessions {
 		}
 	}
 
-	/**
-	 * Evaluates a C/ST expression in the top frame of a suspended DSF thread via
-	 * MI -data-evaluate-expression. Runs on the DSF executor and blocks briefly.
-	 */
+	/** Evaluates in the top frame; kept for callers that have no frame selection. */
 	public static JsonObject evaluateDsf(GdbLaunch launch, String expression, int threadIndex) throws CoreException {
+		return evaluateDsf(launch, expression, threadIndex, null);
+	}
+
+	/**
+	 * Evaluates a C/ST expression in a suspended DSF thread via MI
+	 * {@code -data-evaluate-expression}. A {@code frameId} selects the zero-based
+	 * stack frame level (as reported by {@code framesDsf}); {@code null} means the
+	 * top frame. Runs on the DSF executor and blocks briefly.
+	 */
+	public static JsonObject evaluateDsf(GdbLaunch launch, String expression, int threadIndex, Integer frameId)
+			throws CoreException {
 		if (expression == null || expression.isBlank()) {
 			throw new CoreException(Status.error("The 'expression' argument must not be empty."));
 		}
@@ -714,7 +722,7 @@ public final class DebugSessions {
 												IRunControl.IExecutionDMContext exec = execs
 														.get(Math.min(threadIndex, execs.size() - 1));
 												evaluateInFrame(stack, commandControl, commandFactory, exec,
-														expression, rm);
+														expression, frameId, rm);
 											}
 
 											@Override
@@ -771,44 +779,39 @@ public final class DebugSessions {
 				+ "' to an address (last gdb answer: " + last + ").")); //$NON-NLS-1$
 	}
 
-	/** Issues -data-evaluate-expression on a resolved frame and builds the result JSON. */
-	private static void evaluateInFrame(IStack stack, ICommandControlService commandControl,
-			CommandFactory commandFactory, IRunControl.IExecutionDMContext exec, String expression,
-			DataRequestMonitor<JsonObject> rm) {
-		stack.getTopFrame(exec,
-				new ImmediateDataRequestMonitor<IStack.IFrameDMContext>() {
+	/**
+	 * Resolves the frame to evaluate in: the top frame when {@code frameId} is
+	 * null, otherwise the stack frame whose level equals frameId. Uses the same
+	 * IStack.getFrames chain as framesDsf, so a caller can read levels with that
+	 * tool and then evaluate in one of them.
+	 */
+	private static void resolveFrame(IStack stack, IRunControl.IExecutionDMContext exec, Integer frameId,
+			DataRequestMonitor<IStack.IFrameDMContext> rm) {
+		if (frameId == null) {
+			stack.getTopFrame(exec, rm);
+			return;
+		}
+		stack.getFrames(exec, 0, IStack.ALL_FRAMES,
+				new ImmediateDataRequestMonitor<IStack.IFrameDMContext[]>() {
 					@Override
 					protected void handleSuccess() {
-						IStack.IFrameDMContext top = getData();
-						commandControl.queueCommand(
-								commandFactory.createMIDataEvaluateExpression(top, expression),
-								new ImmediateDataRequestMonitor<MIDataEvaluateExpressionInfo>() {
-									@Override
-									protected void handleCompleted() {
-										MIDataEvaluateExpressionInfo info = getData();
-										boolean ok = getStatus() != null && getStatus().isOK();
-										JsonObject result = new JsonObject();
-										result.put("expression", expression);
-										result.put("value", info != null ? safeText(info::getValue) : "");
-										result.put("success", ok);
-										if (!ok) {
-											result.put("error", getStatus() != null ? getStatus().getMessage() : "evaluate failed");
-										}
-										stack.getFrameData(top,
-												new ImmediateDataRequestMonitor<IStack.IFrameDMData>() {
-													@Override
-													protected void handleCompleted() {
-														IStack.IFrameDMData data = getData();
-														if (data != null) {
-															result.put("function", safeText(data::getFunction));
-															result.put("file", safeText(data::getFile));
-															result.put("line", data.getLine());
-														}
-														rm.done(result);
-													}
-												});
-									}
-								});
+						IStack.IFrameDMContext[] frames = getData();
+						for (IStack.IFrameDMContext frame : frames) {
+							if (frame.getLevel() == frameId.intValue()) {
+								rm.done(frame);
+								return;
+							}
+						}
+						StringBuilder available = new StringBuilder();
+						for (IStack.IFrameDMContext frame : frames) {
+							if (available.length() > 0) {
+								available.append(", "); //$NON-NLS-1$
+							}
+							available.append(Integer.valueOf(frame.getLevel()));
+						}
+						rm.setStatus(Status.error("There is no stack frame at level " + frameId
+								+ "; available levels: " + available + "."));
+						rm.done();
 					}
 
 					@Override
@@ -817,6 +820,54 @@ public final class DebugSessions {
 						rm.done();
 					}
 				});
+	}
+
+	/** Issues -data-evaluate-expression on a resolved frame and builds the result JSON. */
+	private static void evaluateInFrame(IStack stack, ICommandControlService commandControl,
+			CommandFactory commandFactory, IRunControl.IExecutionDMContext exec, String expression, Integer frameId,
+			DataRequestMonitor<JsonObject> rm) {
+		resolveFrame(stack, exec, frameId, new ImmediateDataRequestMonitor<IStack.IFrameDMContext>() {
+			@Override
+			protected void handleSuccess() {
+				IStack.IFrameDMContext frame = getData();
+				commandControl.queueCommand(
+						commandFactory.createMIDataEvaluateExpression(frame, expression),
+						new ImmediateDataRequestMonitor<MIDataEvaluateExpressionInfo>() {
+							@Override
+							protected void handleCompleted() {
+								MIDataEvaluateExpressionInfo info = getData();
+								boolean ok = getStatus() != null && getStatus().isOK();
+								JsonObject result = new JsonObject();
+								result.put("expression", expression);
+								result.put("value", info != null ? safeText(info::getValue) : "");
+								result.put("success", ok);
+								result.put("level", Integer.valueOf(frame.getLevel()));
+								if (!ok) {
+									result.put("error", getStatus() != null ? getStatus().getMessage() : "evaluate failed");
+								}
+								stack.getFrameData(frame,
+										new ImmediateDataRequestMonitor<IStack.IFrameDMData>() {
+											@Override
+											protected void handleCompleted() {
+												IStack.IFrameDMData data = getData();
+												if (data != null) {
+													result.put("function", safeText(data::getFunction));
+													result.put("file", safeText(data::getFile));
+													result.put("line", data.getLine());
+												}
+												rm.done(result);
+											}
+										});
+							}
+						});
+			}
+
+			@Override
+			protected void handleFailure() {
+				rm.setStatus(getStatus());
+				rm.done();
+			}
+		});
 	}
 
 	/**
