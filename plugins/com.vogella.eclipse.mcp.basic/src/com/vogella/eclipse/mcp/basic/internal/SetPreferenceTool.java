@@ -1,5 +1,6 @@
 package com.vogella.eclipse.mcp.basic.internal;
 
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
@@ -18,6 +19,7 @@ import com.vogella.eclipse.mcp.core.McpToolException;
 import com.vogella.eclipse.mcp.core.McpToolResult;
 import com.vogella.eclipse.mcp.core.ToolArguments;
 import com.vogella.eclipse.mcp.core.UiDispatch;
+import com.vogella.eclipse.mcp.core.json.JsonArray;
 import com.vogella.eclipse.mcp.core.json.JsonObject;
 
 /**
@@ -42,7 +44,7 @@ public final class SetPreferenceTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Writes a single preference in the instance or project scope and returns the previous value, so the change can be undone. MODIFIES THE IDE CONFIGURATION: any qualifier may be written, and a wrong preference is both invisible and long-lived, so keep the previous value out of the answer, since nothing else records it. Auto-build (org.eclipse.core.resources, description.autobuilding) is applied through the workspace description rather than as a raw preference write, because writing the raw key does not take effect properly. The key themeid under org.eclipse.e4.ui.css.swt.theme is refused: the write reaches disk, but at the next startup the engine resolves the persisted id against the registered themes and an id that does not resolve is replaced by a fallback that is persisted over it, so it is not a way to switch themes. Use eclipse_set_theme."; //$NON-NLS-1$
+		return "Writes preferences in the instance or project scope and returns every previous value, so the change can be undone. MODIFIES THE IDE CONFIGURATION: any qualifier may be written, and a wrong preference is both invisible and long-lived, so keep the returned previous values, since nothing else records them. Writes go to the standard Eclipse scope nodes, the same ones the Window > Preferences > General > MCP Server page uses, so a change here shows up there. Pass key/value for one write, or values as a {key: value} object for a batch, where a null value removes that key; the batch answer lists every key's previous value and effective value for rollback. Auto-build (org.eclipse.core.resources, description.autobuilding) is applied through the workspace description rather than as a raw preference write, because writing the raw key does not take effect properly, so it must be written one at a time. The key themeid under org.eclipse.e4.ui.css.swt.theme is refused: the write reaches disk, but at the next startup the engine resolves the persisted id against the registered themes and an id that does not resolve is replaced by a fallback that is persisted over it, so it is not a way to switch themes. Use eclipse_set_theme."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -52,12 +54,13 @@ public final class SetPreferenceTool implements IMcpTool {
 				  "type": "object",
 				  "properties": {
 				    "qualifier": {"type":"string","description":"Preference qualifier, such as org.eclipse.jdt.core. eclipse_get_preferences reads them, which is how to find the key you mean before writing it."},
-				    "key":       {"type":"string","description":"Preference key."},
-				    "value":     {"type":"string","description":"New value. Omit to remove the key, which lets the value below it in the lookup order take over."},
+				    "key":       {"type":"string","description":"Preference key for a single write."},
+				    "value":     {"type":"string","description":"New value for a single write. Omit to remove the key, which lets the value below it in the lookup order take over."},
+				    "values":    {"type":"object","additionalProperties":{"type":["string","null"]},"description":"Write several keys at once as {key: value}; a null value removes that key. Cannot be combined with 'key'/'value'. Auto-build and themeid must be written one at a time."},
 				    "scope":     {"type":"string","enum":["instance","project"],"default":"instance"},
 				    "project":   {"type":"string","description":"Project name, required for the project scope."}
 				  },
-				  "required": ["qualifier","key"],
+				  "required": ["qualifier"],
 				  "additionalProperties": false
 				}"""; //$NON-NLS-1$
 	}
@@ -66,11 +69,19 @@ public final class SetPreferenceTool implements IMcpTool {
 	public McpToolResult call(Map<String, Object> arguments, IProgressMonitor monitor) throws McpToolException {
 		ToolArguments args = ToolArguments.of(arguments);
 		String qualifier = args.getString("qualifier"); //$NON-NLS-1$
-		String key = args.getString("key"); //$NON-NLS-1$
-		if (qualifier == null || key == null) {
-			return McpToolResult.error("The arguments 'qualifier' and 'key' are both required."); //$NON-NLS-1$
+		if (qualifier == null) {
+			return McpToolResult.error("The argument 'qualifier' is required."); //$NON-NLS-1$
 		}
-		if (THEME_QUALIFIER.equals(qualifier) && THEMEID_KEY.equals(key)) {
+		Map<String, String> batch = valuesOf(arguments == null ? null : arguments.get("values")); //$NON-NLS-1$
+		String key = args.getString("key"); //$NON-NLS-1$
+		if (batch == null && key == null) {
+			return McpToolResult.error("Provide 'key' for a single write or 'values' for a batch."); //$NON-NLS-1$
+		}
+		if (batch != null && key != null) {
+			return McpToolResult.error("'key' and 'values' cannot be combined; use one write form."); //$NON-NLS-1$
+		}
+		if (THEME_QUALIFIER.equals(qualifier)
+				&& (THEMEID_KEY.equals(key) || (batch != null && batch.containsKey(THEMEID_KEY)))) {
 			return McpToolResult.error(
 					"Writing %s/%s is refused: the write reaches disk, but at the next startup the theme engine resolves the persisted id against the registered themes, and an id that does not resolve is replaced by a fallback that is persisted over it. Writing it is not a way to switch themes; use eclipse_set_theme instead."
 							.formatted(THEME_QUALIFIER, THEMEID_KEY)); //$NON-NLS-1$
@@ -84,6 +95,13 @@ public final class SetPreferenceTool implements IMcpTool {
 					: "Cannot write the scope '%s' for project '%s'.".formatted(scope, projectName)); //$NON-NLS-1$
 		}
 		String value = args.getString("value"); //$NON-NLS-1$
+		if (batch != null) {
+			if (AUTOBUILD_QUALIFIER.equals(qualifier) && batch.containsKey(AUTOBUILD_KEY)) {
+				return McpToolResult
+						.error("Auto-build must be written one at a time with 'key'/'value', not in a batch."); //$NON-NLS-1$
+			}
+			return writeBatch(qualifier, scope, projectName, context, batch);
+		}
 
 		IEclipsePreferences node = context.getNode(qualifier);
 		String previous = node.get(key, null);
@@ -161,6 +179,86 @@ public final class SetPreferenceTool implements IMcpTool {
 				.put("previousValue", previous == null ? String.valueOf(was) : previous) //$NON-NLS-1$
 				.put("effective", String.valueOf(workspace.isAutoBuilding())) //$NON-NLS-1$
 				.put("effectiveScope", "instance") //$NON-NLS-1$ //$NON-NLS-2$
+				.toString());
+	}
+
+	/** Converts the values argument into an ordered key/value map; null values mean "remove". */
+	private static Map<String, String> valuesOf(Object raw) {
+		if (!(raw instanceof Map<?, ?> map) || map.isEmpty()) {
+			return null;
+		}
+		Map<String, String> values = new LinkedHashMap<>();
+		for (Map.Entry<?, ?> entry : map.entrySet()) {
+			String name = entry.getKey() == null ? null : String.valueOf(entry.getKey()).strip();
+			if (name == null || name.isEmpty()) {
+				continue;
+			}
+			Object supplied = entry.getValue();
+			values.put(name, supplied == null ? null : String.valueOf(supplied));
+		}
+		return values.isEmpty() ? null : values;
+	}
+
+	/**
+	 * Writes all keys in one UI dispatch and one flush, after reading every previous
+	 * value: a caller can put the whole workspace back without one call per key.
+	 */
+	private static McpToolResult writeBatch(String qualifier, String scope, String projectName,
+			IScopeContext context, Map<String, String> batch) throws McpToolException {
+		IEclipsePreferences node = context.getNode(qualifier);
+		Map<String, String> previousValues = new LinkedHashMap<>();
+		for (String name : batch.keySet()) {
+			previousValues.put(name, node.get(name, null));
+		}
+		try {
+			UiDispatch.call(() -> {
+				for (Map.Entry<String, String> change : batch.entrySet()) {
+					if (change.getValue() == null) {
+						node.remove(change.getKey());
+					} else {
+						node.put(change.getKey(), change.getValue());
+					}
+				}
+				node.flush();
+				return null;
+			}, CallBudget.maxWaitSeconds());
+		} catch (TimeoutException e) {
+			return McpToolResult
+					.error("The Eclipse UI did not process the batch write of %s within %d seconds. It is still queued and may land later; read it back with eclipse_get_preferences." //$NON-NLS-1$
+							.formatted(qualifier, Integer.valueOf(CallBudget.maxWaitSeconds())));
+		} catch (BackingStoreException e) {
+			throw new McpToolException("Could not save the preferences of " + qualifier, e); //$NON-NLS-1$
+		} catch (Exception e) {
+			throw new McpToolException("Could not write the preferences of " + qualifier, e); //$NON-NLS-1$
+		}
+		Map<String, IEclipsePreferences> nodes = PreferenceScopes.nodes(qualifier, projectName);
+		JsonArray changes = new JsonArray();
+		for (Map.Entry<String, String> change : batch.entrySet()) {
+			String effective = null;
+			String effectiveScope = null;
+			for (String candidate : PreferenceScopes.LOOKUP_ORDER) {
+				IEclipsePreferences lookup = nodes.get(candidate);
+				String found = lookup == null ? null : lookup.get(change.getKey(), null);
+				if (found != null) {
+					effective = found;
+					effectiveScope = candidate;
+					break;
+				}
+			}
+			changes.add(new JsonObject().put("key", change.getKey()) //$NON-NLS-1$
+					.put("previousValue", previousValues.get(change.getKey())) //$NON-NLS-1$
+					.put("newValue", change.getValue()) //$NON-NLS-1$
+					.put("effective", effective) //$NON-NLS-1$
+					.put("effectiveScope", effectiveScope)); //$NON-NLS-1$
+		}
+		JsonObject previous = new JsonObject();
+		previousValues.forEach(previous::put);
+		return McpToolResult.of(new JsonObject().put("qualifier", qualifier) //$NON-NLS-1$
+				.put("scope", scope) //$NON-NLS-1$
+				.put("project", projectName) //$NON-NLS-1$
+				.put("batch", Boolean.TRUE) //$NON-NLS-1$
+				.put("previousValues", previous) //$NON-NLS-1$
+				.put("changes", changes) //$NON-NLS-1$
 				.toString());
 	}
 }

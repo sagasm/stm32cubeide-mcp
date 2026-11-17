@@ -39,7 +39,7 @@ public final class GetPreferencesTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Reads Eclipse preferences for a qualifier, for example org.eclipse.jdt.core or org.eclipse.core.resources, and reports which scope each value comes from. Use it to find out what has actually been customized in this workspace or project, for instance whether auto-build is off (org.eclipse.core.resources, key description.autobuilding)."; //$NON-NLS-1$
+		return "Reads Eclipse preferences for a qualifier, for example org.eclipse.jdt.core or org.eclipse.core.resources, and reports which scope each value comes from. Use it to find out what has actually been customized in this workspace or project, for instance whether auto-build is off (org.eclipse.core.resources, key description.autobuilding). The values come from the standard Eclipse scope nodes, the same ones the Window > Preferences > General > MCP Server page writes, so a change made here shows up there and vice versa. Pass keys to read several exact keys in one call; a key absent from every scope is still reported with a null effective value, which is how to check several candidates without one call per key."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -50,6 +50,7 @@ public final class GetPreferencesTool implements IMcpTool {
 				  "properties": {
 				    "qualifier":       {"type":"string","description":"Preference qualifier, usually a bundle symbolic name such as org.eclipse.jdt.core."},
 				    "key":             {"type":"string","description":"Exact preference key. Omit to list the keys of the qualifier."},
+				    "keys":            {"type":"array","items":{"type":"string"},"description":"Read several exact keys in one call. Keys set in no scope are still reported with effective:null. Merged with the keys found by scope/key/keyPattern."},
 				    "keyPattern":      {"type":"string","description":"Glob over keys for discovery, '*' and '?' allowed, case insensitive."},
 				    "scope":           {"type":"string","enum":["instance","project","configuration","default","all"],"default":"instance","description":"Only list keys that are set in this scope. 'all' lists keys set in any scope."},
 				    "project":         {"type":"string","description":"Project name, required for the project scope."},
@@ -85,6 +86,16 @@ public final class GetPreferencesTool implements IMcpTool {
 			}
 		}
 		String key = args.getString("key"); //$NON-NLS-1$
+		List<String> requestedKeys = new ArrayList<>();
+		Object rawKeys = arguments == null ? null : arguments.get("keys"); //$NON-NLS-1$
+		if (rawKeys instanceof List<?> list) {
+			for (Object item : list) {
+				String requested = item == null ? null : String.valueOf(item).strip();
+				if (requested != null && !requested.isEmpty() && !requestedKeys.contains(requested)) {
+					requestedKeys.add(requested);
+				}
+			}
+		}
 		Pattern keyPattern;
 		try {
 			keyPattern = Globs.compile(args.getString("keyPattern")); //$NON-NLS-1$
@@ -103,6 +114,11 @@ public final class GetPreferencesTool implements IMcpTool {
 		}
 
 		List<String> keys = new ArrayList<>(select(keysByScope, scope, includeDefaults));
+		for (String requested : requestedKeys) {
+			if (!keys.contains(requested)) {
+				keys.add(requested);
+			}
+		}
 		keys.removeIf(candidate -> key != null && !key.equals(candidate));
 		keys.removeIf(candidate -> keyPattern != null && !keyPattern.matcher(candidate).matches());
 		keys.sort(null);
@@ -111,9 +127,12 @@ public final class GetPreferencesTool implements IMcpTool {
 		for (String reportedKey : keys.subList(0, Math.min(maxResults, keys.size()))) {
 			reported.add(describe(reportedKey, nodes));
 		}
+		JsonArray requested = new JsonArray();
+		requestedKeys.forEach(requested::add);
 		JsonObject result = new JsonObject().put("qualifier", qualifier) //$NON-NLS-1$
 				.put("project", projectName) //$NON-NLS-1$
 				.put("scope", scope) //$NON-NLS-1$
+				.put("keys", requestedKeys.isEmpty() ? null : requested) //$NON-NLS-1$
 				.put("total", keys.size()) //$NON-NLS-1$
 				.put("truncated", keys.size() > reported.size()) //$NON-NLS-1$
 				.put("preferences", reported); //$NON-NLS-1$

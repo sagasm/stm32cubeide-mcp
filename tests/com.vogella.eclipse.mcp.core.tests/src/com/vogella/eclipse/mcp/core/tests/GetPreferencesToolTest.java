@@ -99,6 +99,24 @@ class GetPreferencesToolTest {
 	}
 
 	@Test
+	@SuppressWarnings("unchecked")
+	void readsSeveralExactKeysIncludingAnUnsetOne() throws Exception {
+		IEclipsePreferences node = InstanceScope.INSTANCE.getNode(QUALIFIER);
+		set(node, "colour", "blue");
+		set(node, "size", "large");
+
+		Map<String, Object> result = TestFixture.callAndParse(TOOL,
+				Map.of("qualifier", QUALIFIER, "keys", List.of("colour", "size", "never.set")));
+
+		assertEquals(Integer.valueOf(3), result.get("total"), "got " + result);
+		assertEquals(List.of("colour", "never.set", "size"), keys(result));
+		Map<String, Object> unset = ((List<Map<String, Object>>) result.get("preferences")).stream()
+				.filter(preference -> "never.set".equals(preference.get("key"))).findFirst().orElseThrow();
+		assertNull(unset.get("effective"));
+		assertNull(unset.get("effectiveScope"));
+	}
+
+	@Test
 	void readsTheAutoBuildSettingOfThisWorkspace() throws Exception {
 		Map<String, Object> result = TestFixture.callAndParse(TOOL, Map.of("qualifier", "org.eclipse.core.resources",
 				"key", "description.autobuilding", "scope", "all", "includeDefaults", Boolean.TRUE));

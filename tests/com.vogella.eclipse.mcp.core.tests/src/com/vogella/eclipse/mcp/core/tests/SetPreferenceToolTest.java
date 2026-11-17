@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeoutException;
@@ -12,6 +13,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.eclipse.core.resources.IWorkspace;
 import org.eclipse.core.resources.IWorkspaceDescription;
 import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.runtime.preferences.IEclipsePreferences;
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -193,5 +196,56 @@ class SetPreferenceToolTest {
 
 		assertEquals("project", result.get("effectiveScope"));
 		assertEquals("project-value", result.get("effective"));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void writesABatchAndReturnsEveryPreviousValue() throws Exception {
+		IEclipsePreferences node = InstanceScope.INSTANCE.getNode(QUALIFIER);
+		node.put(KEY, "old");
+		String second = KEY + ".batch";
+		node.put(second, "older");
+		node.flush();
+		try {
+			Map<String, Object> result = TestFixture.callAndParse(TOOL,
+					Map.of("qualifier", QUALIFIER, "values", Map.of(KEY, "new", second, "newer")));
+
+			assertEquals(Boolean.TRUE, result.get("batch"));
+			Map<String, Object> previous = (Map<String, Object>) result.get("previousValues");
+			assertEquals("old", previous.get(KEY));
+			assertEquals("older", previous.get(second));
+			assertEquals("new", node.get(KEY, null));
+			assertEquals("newer", node.get(second, null));
+			List<Map<String, Object>> changes = (List<Map<String, Object>>) result.get("changes");
+			assertEquals(2, changes.size(), "got " + result);
+		} finally {
+			node.remove(second);
+			node.flush();
+		}
+	}
+
+	@Test
+	void writesToTheNodeThePlatformReads() throws Exception {
+		TestFixture.callAndParse(TOOL, Map.of("qualifier", QUALIFIER, "key", KEY, "value", "shared"));
+
+		assertEquals("shared", Platform.getPreferencesService().getString(QUALIFIER, KEY, null, null));
+	}
+
+	@Test
+	void refusesToMixSingleAndBatchForms() throws Exception {
+		McpToolResult result = TestFixture.call(TOOL, Map.of("qualifier", QUALIFIER, "key", KEY, "value", "x",
+				"values", Map.of(KEY, "y")));
+
+		assertTrue(result.isError(), result.text());
+		assertTrue(result.text().contains("cannot be combined"), result.text());
+	}
+
+	@Test
+	void refusesThemeidInABatch() throws Exception {
+		McpToolResult result = TestFixture.call(TOOL,
+				Map.of("qualifier", THEME_QUALIFIER, "values", Map.of("themeid", "some.theme")));
+
+		assertTrue(result.isError(), result.text());
+		assertTrue(result.text().contains("eclipse_set_theme"), result.text());
 	}
 }
