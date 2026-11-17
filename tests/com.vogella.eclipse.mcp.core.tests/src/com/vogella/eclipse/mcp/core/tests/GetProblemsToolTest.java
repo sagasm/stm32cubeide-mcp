@@ -4,12 +4,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IWorkspace;
@@ -270,8 +272,87 @@ class GetProblemsToolTest {
 	}
 
 	@Test
+	@SuppressWarnings("unchecked")
+	void sourceSetFiltersToTheRequestedCDTPath() throws Exception {
+		IProject project = fixture.createProject(PROJECT);
+		writeCProject(project, "Replace", "Core");
+		createMarkerIn(project, "Replace/Main.c", IMarker.SEVERITY_ERROR, "In Replace", 1);
+		createMarkerIn(project, "Core/Src/main.c", IMarker.SEVERITY_ERROR, "In Core", 2);
+
+		Map<String, Object> replace = TestFixture.callAndParse("eclipse_get_problems",
+				Map.of("project", PROJECT, "sourceSet", "Replace"));
+		assertEquals(Integer.valueOf(1), replace.get("total"), "got " + replace);
+		assertEquals("In Replace", onlyProblem(replace).get("message"));
+		assertEquals(List.of("Replace", "Core"), replace.get("availableSourceSets"));
+
+		// an array selects several source paths at once
+		Map<String, Object> both = TestFixture.callAndParse("eclipse_get_problems",
+				Map.of("project", PROJECT, "sourceSet", List.of("Replace", "Core")));
+		assertEquals(Integer.valueOf(2), both.get("total"), "got " + both);
+	}
+
+	@Test
+	void rejectsAnUnknownSourceSetWhenCProjectDeclaresPaths() throws Exception {
+		IProject project = fixture.createProject(PROJECT);
+		writeCProject(project, "Replace");
+
+		McpToolResult result = TestFixture.call("eclipse_get_problems",
+				Map.of("project", PROJECT, "sourceSet", "NoSuchSourceSet"));
+		assertTrue(result.isError(), result.text());
+		assertTrue(result.text().contains("Replace"), result.text());
+	}
+
+	@Test
+	void sourceSetWithoutCProjectFiltersByPathAnyway() throws Exception {
+		IProject project = fixture.createProject(PROJECT);
+		createMarkerIn(project, "Replace/Main.c", IMarker.SEVERITY_ERROR, "In Replace", 1);
+		createMarkerIn(project, "Elsewhere/Other.c", IMarker.SEVERITY_ERROR, "Outside", 2);
+
+		Map<String, Object> result = TestFixture.callAndParse("eclipse_get_problems",
+				Map.of("project", PROJECT, "sourceSet", "Replace"));
+		assertEquals(Integer.valueOf(1), result.get("total"), "got " + result);
+		assertEquals("In Replace", onlyProblem(result).get("message"));
+	}
+
+	@Test
 	void rejectsAnUnknownSeverity() throws Exception {
 		assertTrue(TestFixture.call("eclipse_get_problems", Map.of("severity", "critical")).isError());
+	}
+
+	private static void writeCProject(IProject project, String... sourcePaths) throws Exception {
+		StringBuilder xml = new StringBuilder("""
+				<?xml version="1.0" encoding="UTF-8"?>
+				<cproject>
+				  <storageModule moduleId="org.eclipse.cdt.core.settings">
+				    <configuration name="Debug">
+				      <sourceEntries>
+				""");
+		for (String sourcePath : sourcePaths) {
+			xml.append("<entry kind=\"sourcePath\" name=\"").append(sourcePath).append("\"/>"); //$NON-NLS-1$ //$NON-NLS-2$
+		}
+		xml.append("""
+				      </sourceEntries>
+				    </configuration>
+				  </storageModule>
+				</cproject>
+				""");
+		IFile file = project.getFile(".cproject"); //$NON-NLS-1$
+		file.create(new ByteArrayInputStream(xml.toString().getBytes(StandardCharsets.UTF_8)), true,
+				new NullProgressMonitor());
+	}
+
+	private static void createMarkerIn(IProject project, String path, int severity, String message, int line)
+			throws Exception {
+		IFile file = project.getFile(path);
+		IFolder parent = (IFolder) file.getParent();
+		if (!parent.exists()) {
+			parent.create(true, true, new NullProgressMonitor());
+		}
+		file.create(new ByteArrayInputStream(new byte[0]), true, new NullProgressMonitor());
+		IMarker marker = file.createMarker(IMarker.PROBLEM);
+		marker.setAttribute(IMarker.SEVERITY, severity);
+		marker.setAttribute(IMarker.MESSAGE, message);
+		marker.setAttribute(IMarker.LINE_NUMBER, line);
 	}
 
 	@SuppressWarnings("unchecked")

@@ -1,5 +1,7 @@
 package com.vogella.eclipse.mcp.basic.internal;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -9,6 +11,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+
+import javax.xml.parsers.DocumentBuilderFactory;
 
 import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IProject;
@@ -21,6 +25,8 @@ import org.eclipse.core.runtime.IExtensionRegistry;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.core.runtime.Platform;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 
 import com.vogella.eclipse.mcp.core.IMcpTool;
 import com.vogella.eclipse.mcp.core.McpToolException;
@@ -49,7 +55,7 @@ public final class GetProblemsTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Returns compilation errors and warnings from the Eclipse workspace, as computed by the incremental builder. It refreshes from disk by default, scoped to the project when one is named, and WAITS for a build already running, reporting waitedForBuild so an answer taken while one was in flight is not mistaken for a settled one, but it NEVER STARTS ONE. Asking for markers used to start an incremental build that JDT turned into a batch compile of every open project, so reading them cost thirty seconds; starting a build is eclipse_build's job. With auto-build off the markers are therefore from the last build and upToDate says so. messageFilter narrows to problems whose message contains a substring, which is how to ask for deprecation warnings alone rather than pulling every warning and filtering them yourself. types and excludeTypes filter by marker type with subtypes included: markers from a builder that did not rerun can appear and disappear across rebuilds of an unchanged commit, so excluding that builder's type is how a before/after comparison stops reporting them as regressions. byType counts what came back, so which builders contribute is visible without asking twice."; //$NON-NLS-1$
+		return "Returns compilation errors and warnings from the Eclipse workspace, as computed by the incremental builder. It refreshes from disk by default, scoped to the project when one is named, and WAITS for a build already running, reporting waitedForBuild so an answer taken while one was in flight is not mistaken for a settled one, but it NEVER STARTS ONE. Asking for markers used to start an incremental build that JDT turned into a batch compile of every open project, so reading them cost thirty seconds; starting a build is eclipse_build's job. With auto-build off the markers are therefore from the last build and upToDate says so. messageFilter narrows to problems whose message contains a substring, which is how to ask for deprecation warnings alone rather than pulling every warning and filtering them yourself. types and excludeTypes filter by marker type with subtypes included: markers from a builder that did not rerun can appear and disappear across rebuilds of an unchanged commit, so excluding that builder's type is how a before/after comparison stops reporting them as regressions. byType counts what came back, so which builders contribute is visible without asking twice. sourceSet narrows to CDT source paths from .cproject, such as 'Replace' or 'Core', as a string or an array; an unknown name is rejected with the available list instead of silently returning nothing. This tool never starts a build even when markers look stale: upToDate and staleness say so, because triggering one used to turn a marker read into a thirty-second batch compile of every open project. Run eclipse_build when fresh markers matter."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -61,6 +67,7 @@ public final class GetProblemsTool implements IMcpTool {
 				    "severity":   {"type":"string","enum":["error","warning","info","all"],"default":"error","description":"Only return problems of exactly this severity. Use 'all' for every severity."},
 				    "project":    {"type":"string","description":"Restrict to this project name."},
 				    "pathPrefix": {"type":"string","description":"Restrict to workspace paths starting with this prefix."},
+				    "sourceSet":  {"oneOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}],"description":"Only problems under these CDT source paths from .cproject, e.g. 'Replace' or 'Core'. A string or an array. An unknown name is rejected with the available list rather than silently returning nothing."},
 				    "maxResults": {"type":"integer","default":200,"minimum":1,"maximum":2000},
 				    "marker":     {"type":"string","description":"A marker from eclipse_mark_problems. Reports only the problems that appeared since it, plus the ones that went away, instead of everything."},
 				    "messageFilter": {"type":"string","description":"Only problems whose message contains this text, case insensitive. Use 'deprecated' for deprecation warnings."},
@@ -104,6 +111,16 @@ public final class GetProblemsTool implements IMcpTool {
 			}
 		}
 		IResource scope = project == null ? ResourcesPlugin.getWorkspace().getRoot() : project;
+		List<String> sourceSets = stringList(arguments, "sourceSet"); //$NON-NLS-1$
+		Set<String> availableSets = project == null ? null : sourceSets(project);
+		if (!sourceSets.isEmpty() && availableSets != null && !availableSets.isEmpty()) {
+			// a non-CDT project has no .cproject to validate against; the path filter still applies
+			List<String> unknown = sourceSets.stream().filter(name -> !availableSets.contains(name)).toList();
+			if (!unknown.isEmpty()) {
+				return McpToolResult.error("Unknown sourceSet " + unknown //$NON-NLS-1$
+						+ "; available in " + projectName + ": " + availableSets); //$NON-NLS-1$ //$NON-NLS-2$
+			}
+		}
 		if (refresh) {
 			try {
 				WorkspaceSync.refresh(scope, monitor);
@@ -140,8 +157,9 @@ public final class GetProblemsTool implements IMcpTool {
 				continue;
 			}
 			Problem problem = toProblem(marker, severity, projectName, pathPrefix);
-			if (problem != null && (lowerFilter == null || problem.message()
-					.toLowerCase(Locale.ROOT).contains(lowerFilter))) {
+			if (problem != null && inSourceSet(problem.path(), sourceSets)
+					&& (lowerFilter == null || problem.message()
+							.toLowerCase(Locale.ROOT).contains(lowerFilter))) {
 				problems.add(problem);
 			}
 		}
@@ -153,8 +171,8 @@ public final class GetProblemsTool implements IMcpTool {
 			for (String gone : baseline) {
 				// the diff has to be taken over the scope the caller asked about, not
 				// over the whole workspace the marker recorded
-				if (!inScope(gone, projectName, pathPrefix, severity, messageFilter, types, excludeTypes)
-						|| now.contains(gone)) {
+				if (!inScope(gone, projectName, pathPrefix, severity, messageFilter, types, excludeTypes,
+						sourceSets) || now.contains(gone)) {
 					continue;
 				}
 				resolvedTotal++;
@@ -184,9 +202,17 @@ public final class GetProblemsTool implements IMcpTool {
 				(left, right) -> Integer.valueOf(left.intValue() + right.intValue())));
 		JsonObject byType = new JsonObject();
 		perType.forEach(byType::put);
+		JsonArray requestedSets = new JsonArray();
+		sourceSets.forEach(requestedSets::add);
+		JsonArray availableArray = new JsonArray();
+		if (availableSets != null) {
+			availableSets.forEach(availableArray::add);
+		}
 		JsonObject result = new JsonObject().put("total", problems.size()) //$NON-NLS-1$
 				.put("byType", byType) //$NON-NLS-1$
 				.put("truncated", problems.size() > reported.size()) //$NON-NLS-1$
+				.put("sourceSet", sourceSets.isEmpty() ? null : requestedSets) //$NON-NLS-1$
+				.put("availableSourceSets", availableSets == null ? null : availableArray) //$NON-NLS-1$
 				.put("refreshed", Boolean.valueOf(refresh)) //$NON-NLS-1$
 				.put("waitedForBuild", Boolean.valueOf(waited)) //$NON-NLS-1$
 				.put("upToDate", upToDate) //$NON-NLS-1$
@@ -230,13 +256,16 @@ public final class GetProblemsTool implements IMcpTool {
 	 * asked about, all of them still present.
 	 */
 	private static boolean inScope(String key, String projectName, String pathPrefix, String severity,
-			String messageFilter, List<String> types, List<String> excludeTypes) {
+			String messageFilter, List<String> types, List<String> excludeTypes, List<String> sourceSets) {
 		String[] parts = key.split(":", 5); //$NON-NLS-1$
 		if (!typeWanted(parts[3], types, excludeTypes)) {
 			return false;
 		}
 		String path = parts[0];
 		if (projectName != null && !path.startsWith("/" + projectName + "/")) { //$NON-NLS-1$ //$NON-NLS-2$
+			return false;
+		}
+		if (!inSourceSet(path, sourceSets)) {
 			return false;
 		}
 		if (pathPrefix != null && !path.startsWith(pathPrefix)) {
@@ -334,10 +363,62 @@ public final class GetProblemsTool implements IMcpTool {
 	}
 
 	private static List<String> stringList(Map<String, Object> arguments, String name) {
-		if (arguments == null || !(arguments.get(name) instanceof List<?> list)) {
-			return List.of();
+		Object raw = arguments == null ? null : arguments.get(name);
+		if (raw instanceof String single) {
+			return single.isBlank() ? List.of() : List.of(single.strip());
 		}
-		return list.stream().map(String::valueOf).map(String::strip).filter(value -> !value.isEmpty()).toList();
+		if (raw instanceof List<?> list) {
+			return list.stream().map(String::valueOf).map(String::strip).filter(value -> !value.isEmpty()).toList();
+		}
+		return List.of();
+	}
+
+	/** True when a workspace path sits under one of the requested CDT source paths. */
+	private static boolean inSourceSet(String path, List<String> sourceSets) {
+		if (sourceSets.isEmpty()) {
+			return true;
+		}
+		String[] segments = path.split("/", 4); // /project/sourceSet/rest/of/path
+		if (segments.length < 3) {
+			return false;
+		}
+		String relative = segments[2] + (segments.length > 3 ? "/" + segments[3] : ""); //$NON-NLS-1$
+		for (String sourceSet : sourceSets) {
+			if (relative.equals(sourceSet) || relative.startsWith(sourceSet + "/")) { //$NON-NLS-1$
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Union of sourcePath entries across all build configurations in .cproject. */
+	private static Set<String> sourceSets(IProject project) {
+		Set<String> result = new LinkedHashSet<>();
+		if (project == null || project.getLocation() == null) {
+			return result;
+		}
+		Path cproject = project.getLocation().toFile().toPath().resolve(".cproject"); //$NON-NLS-1$
+		if (!Files.isRegularFile(cproject)) {
+			return result;
+		}
+		try {
+			DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+			factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true); //$NON-NLS-1$
+			NodeList entries = factory.newDocumentBuilder().parse(cproject.toFile())
+					.getElementsByTagName("entry"); //$NON-NLS-1$
+			for (int i = 0; i < entries.getLength(); i++) {
+				Element entry = (Element) entries.item(i);
+				if ("sourcePath".equals(entry.getAttribute("kind"))) { //$NON-NLS-1$ //$NON-NLS-2$
+					String name = entry.getAttribute("name").strip(); //$NON-NLS-1$
+					if (!name.isEmpty() && !name.contains("$")) { //$NON-NLS-1$
+						result.add(name);
+					}
+				}
+			}
+		} catch (Exception e) {
+			// a project without readable source entries simply has no restriction
+		}
+		return result;
 	}
 
 	private static Problem toProblem(IMarker marker, String severity, String projectName, String pathPrefix) {
