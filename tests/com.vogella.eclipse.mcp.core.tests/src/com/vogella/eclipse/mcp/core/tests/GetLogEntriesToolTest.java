@@ -70,6 +70,59 @@ class GetLogEntriesToolTest {
 	}
 
 	@Test
+	void pagesALongStackTrace() throws Exception {
+		String message = "mcp stack page " + System.nanoTime();
+		log(new Status(IStatus.ERROR, PLUGIN, message, new IllegalStateException("page me")));
+
+		String full = (String) awaitEntry(message).get("stackTrace");
+		assertTrue(full != null && full.length() > 40, "stack too short to page: " + full);
+
+		Map<String, Object> first = onlyEntry(TestFixture.callAndParse(TOOL,
+				Map.of("messageFilter", message, "stackTraceMaxChars", Integer.valueOf(20))));
+		assertEquals(full.substring(0, 20), first.get("stackTrace"));
+		assertEquals(Boolean.TRUE, first.get("stackTraceTruncated"));
+		assertEquals(Integer.valueOf(full.length()), first.get("stackTraceTotalChars"));
+		assertEquals(Integer.valueOf(0), first.get("stackTraceOffset"));
+
+		Map<String, Object> second = onlyEntry(TestFixture.callAndParse(TOOL,
+				Map.of("messageFilter", message, "stackTraceMaxChars", Integer.valueOf(20),
+						"stackTraceOffset", Integer.valueOf(20))));
+		assertEquals(full.substring(20, 40), second.get("stackTrace"));
+		assertEquals(Integer.valueOf(20), second.get("stackTraceOffset"));
+	}
+
+	@Test
+	void returnsTheWholeStackTraceWhenMaxIsZero() throws Exception {
+		String message = "mcp whole stack " + System.nanoTime();
+		log(new Status(IStatus.ERROR, PLUGIN, message, new IllegalStateException("whole")));
+		String expected = (String) awaitEntry(message).get("stackTrace");
+
+		Map<String, Object> whole = onlyEntry(TestFixture.callAndParse(TOOL,
+				Map.of("messageFilter", message, "stackTraceMaxChars", Integer.valueOf(0))));
+		assertEquals(expected, whole.get("stackTrace"));
+		assertNull(whole.get("stackTraceTruncated"));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void pagesTheStackTraceOfAChildStatus() throws Exception {
+		String message = "mcp child stack page " + System.nanoTime();
+		MultiStatus multi = new MultiStatus(PLUGIN, 0, message, null);
+		multi.add(new Status(IStatus.INFO, PLUGIN, "child with stack", new IllegalStateException("child boom")));
+		log(multi);
+
+		Map<String, Object> entry = awaitEntry(message);
+		String childFull = (String) ((List<Map<String, Object>>) entry.get("children")).get(0).get("stackTrace");
+		assertTrue(childFull != null && childFull.length() > 20, "child stack too short");
+
+		Map<String, Object> paged = onlyEntry(TestFixture.callAndParse(TOOL,
+				Map.of("messageFilter", message, "stackTraceMaxChars", Integer.valueOf(20))));
+		Map<String, Object> child = ((List<Map<String, Object>>) paged.get("children")).get(0);
+		assertEquals(childFull.substring(0, 20), child.get("stackTrace"));
+		assertEquals(Boolean.TRUE, child.get("stackTraceTruncated"));
+	}
+
+	@Test
 	void filtersByPluginAndSeverity() throws Exception {
 		String message = "mcp severity marker " + System.nanoTime();
 		log(new Status(IStatus.WARNING, PLUGIN, message));

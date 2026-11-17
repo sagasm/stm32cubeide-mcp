@@ -40,7 +40,7 @@ public final class GetLogEntriesTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Returns entries from the Eclipse platform log, the file behind the Error Log view, including the stack traces and the nested child statuses of a multi status. This is where UI freezes reported by org.eclipse.ui.monitoring and exceptions thrown by builders end up; those never become problem markers, so eclipse_get_problems does not see them. Note that UI freezes are logged as warnings, which is why the default severity here is 'all' rather than 'error'."; //$NON-NLS-1$
+		return "Returns entries from the Eclipse platform log, the file behind the Error Log view, including the stack traces and the nested child statuses of a multi status. This is where UI freezes reported by org.eclipse.ui.monitoring and exceptions thrown by builders end up; those never become problem markers, so eclipse_get_problems does not see them. Note that UI freezes are logged as warnings, which is why the default severity here is 'all' rather than 'error'. For 'what did this action add', take a marker with eclipse_mark_log before it and pass that marker here: it is an exact byte position in the IDE's own log, unlike a caller-supplied clock, and a rotated or cleared log is reported rather than silently misread; 'since' is the timestamp alternative when no marker was taken. A single stack trace from a UI freeze can be huge, so stackTraceMaxChars returns a window of it with stackTraceTotalChars and stackTraceTruncated for paging with stackTraceOffset, instead of making includeStackTraces an all-or-nothing choice."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -55,7 +55,9 @@ public final class GetLogEntriesTool implements IMcpTool {
 				    "marker":             {"type":"string","description":"A marker from eclipse_mark_log. Reports only what was logged after that point, with no dependence on the caller's clock."},
 				    "since":              {"type":"string","description":"Only return entries logged at or after this local timestamp, for example 2026-08-20T11:00 or 2026-08-20."},
 				    "maxResults":         {"type":"integer","default":50,"minimum":1,"maximum":500},
-				    "includeStackTraces": {"type":"boolean","default":true,"description":"Include the full stack trace of every entry and child. Set to false for a compact overview; the stack traces of a UI freeze are long."},
+				    "includeStackTraces": {"type":"boolean","default":true,"description":"Include the stack trace of every entry and child. Set to false for a compact overview."},
+				    "stackTraceMaxChars": {"type":"integer","default":4000,"minimum":0,"maximum":100000,"description":"Max characters of each stack trace. A longer one is returned as a window with stackTraceTruncated and stackTraceTotalChars so stackTraceOffset can page it. 0 returns the whole trace."},
+				    "stackTraceOffset":   {"type":"integer","default":0,"minimum":0,"maximum":1000000,"description":"Character offset into a stack trace being paged."},
 				    "newestFirst":        {"type":"boolean","default":true,"description":"Return the newest entries first, so that truncation keeps the most recent ones."}
 				  },
 				  "additionalProperties": false
@@ -95,6 +97,8 @@ public final class GetLogEntriesTool implements IMcpTool {
 			fromByte = position.longValue();
 		}
 		boolean includeStackTraces = args.getBoolean("includeStackTraces", true); //$NON-NLS-1$
+		int stackTraceMaxChars = args.getInt("stackTraceMaxChars", 4000, 0, 100_000); //$NON-NLS-1$
+		int stackTraceOffset = args.getInt("stackTraceOffset", 0, 0, 1_000_000); //$NON-NLS-1$
 		boolean newestFirst = args.getBoolean("newestFirst", true); //$NON-NLS-1$
 
 		Path logFile = logFile();
@@ -139,7 +143,7 @@ public final class GetLogEntriesTool implements IMcpTool {
 
 		JsonArray reported = new JsonArray();
 		for (PlatformLogFile.Entry entry : matching.subList(0, Math.min(maxResults, matching.size()))) {
-			reported.add(toJson(entry, includeStackTraces));
+			reported.add(toJson(entry, includeStackTraces, stackTraceMaxChars, stackTraceOffset));
 		}
 		JsonObject result = new JsonObject().put("logFile", logFile.toString()) //$NON-NLS-1$
 				.put("total", matching.size()) //$NON-NLS-1$
@@ -190,7 +194,8 @@ public final class GetLogEntriesTool implements IMcpTool {
 		return since == null || (entry.time() != null && !entry.time().isBefore(since));
 	}
 
-	private static JsonObject toJson(PlatformLogFile.Entry entry, boolean includeStackTraces) {
+	private static JsonObject toJson(PlatformLogFile.Entry entry, boolean includeStackTraces,
+			int stackTraceMaxChars, int stackTraceOffset) {
 		JsonObject json = new JsonObject().put("plugin", entry.plugin()) //$NON-NLS-1$
 				.put("severity", severityName(entry.severity())) //$NON-NLS-1$
 				.put("code", entry.code()) //$NON-NLS-1$
@@ -198,12 +203,22 @@ public final class GetLogEntriesTool implements IMcpTool {
 				.put("message", entry.message()) //$NON-NLS-1$
 				.put("exception", entry.exception()); //$NON-NLS-1$
 		if (includeStackTraces) {
-			json.put("stackTrace", entry.stackTrace()); //$NON-NLS-1$
+			String trace = entry.stackTrace();
+			if (trace != null && stackTraceMaxChars > 0 && trace.length() > stackTraceMaxChars) {
+				int from = Math.min(stackTraceOffset, trace.length());
+				int to = Math.min(from + stackTraceMaxChars, trace.length());
+				json.put("stackTrace", trace.substring(from, to)) //$NON-NLS-1$
+						.put("stackTraceTruncated", Boolean.TRUE) //$NON-NLS-1$
+						.put("stackTraceTotalChars", Integer.valueOf(trace.length())) //$NON-NLS-1$
+						.put("stackTraceOffset", Integer.valueOf(from)); //$NON-NLS-1$
+			} else {
+				json.put("stackTrace", trace); //$NON-NLS-1$
+			}
 		}
 		if (!entry.children().isEmpty()) {
 			JsonArray children = new JsonArray();
 			for (PlatformLogFile.Entry child : entry.children()) {
-				children.add(toJson(child, includeStackTraces));
+				children.add(toJson(child, includeStackTraces, stackTraceMaxChars, stackTraceOffset));
 			}
 			json.put("children", children); //$NON-NLS-1$
 		}
