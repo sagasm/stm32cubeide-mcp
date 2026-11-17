@@ -1,5 +1,6 @@
 package com.vogella.eclipse.mcp.basic.internal;
 
+import java.util.List;
 import java.util.Map;
 
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -23,7 +24,7 @@ public final class GetBuildStatusTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Reports the state of work started through eclipse_build or eclipse_refresh: running, done, failed or cancelled, how long the refresh and the build each took, the builder failures it hit and the error and warning counts that followed it. Without a buildId it reports the most recent build. EVERY ANSWER ALSO CARRIES 'jobs', which is the live job manager rather than this server's own record: the auto-build is started by the workspace and by nobody's tool, so after a restart the IDE builds for a minute or two while no build here has a state at all. Ask that before timing anything. eclipse_wait_until_quiet waits for it instead of asking."; //$NON-NLS-1$
+		return "Reports the state of work started through eclipse_build or eclipse_refresh: running, done, failed or cancelled, how long the refresh and the build each took, the builder failures it hit and the error and warning counts that followed it. 'problemSummary' shows the first error and warning markers behind those counts, and 'save' says whether the optional pre-build editor save ran and how many editors were dirty. Without a buildId it reports the most recent build. EVERY ANSWER ALSO CARRIES 'jobs', which is the live job manager rather than this server's own record: the auto-build is started by the workspace and by nobody's tool, so after a restart the IDE builds for a minute or two while no build here has a state at all. Ask that before timing anything. eclipse_wait_until_quiet waits for it instead of asking."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -103,6 +104,8 @@ public final class GetBuildStatusTool implements IMcpTool {
 				.put("note", build.note()) //$NON-NLS-1$
 				.put("errors", build.errors() < 0 ? null : Integer.valueOf(build.errors())) //$NON-NLS-1$
 				.put("warnings", build.warnings() < 0 ? null : Integer.valueOf(build.warnings())) //$NON-NLS-1$
+				.put("problemSummary", problemSummary(build)) //$NON-NLS-1$
+				.put("save", save(build.save())) //$NON-NLS-1$
 				.put("builderFailures", failures); //$NON-NLS-1$
 		if (includeBuiltProjects) {
 			JsonArray builtProjects = new JsonArray();
@@ -110,5 +113,44 @@ public final class GetBuildStatusTool implements IMcpTool {
 			json.put("builtProjects", builtProjects); //$NON-NLS-1$
 		}
 		return json;
+	}
+
+	/** What the optional pre-build editor save managed to do. */
+	private static JsonObject save(BuildRegistry.SaveOutcome save) {
+		JsonObject json = new JsonObject().put("requested", Boolean.valueOf(save.requested())); //$NON-NLS-1$
+		if (!save.requested()) {
+			return json;
+		}
+		json.put("available", Boolean.valueOf(save.available())) //$NON-NLS-1$
+				.put("dirtyBefore", save.available() ? Integer.valueOf(save.dirtyBefore()) : null) //$NON-NLS-1$
+				.put("dirtyAfter", save.available() ? Integer.valueOf(save.dirtyAfter()) : null) //$NON-NLS-1$
+				.put("millis", Long.valueOf(save.millis())); //$NON-NLS-1$
+		if (save.note() != null) {
+			json.put("note", save.note()); //$NON-NLS-1$
+		}
+		return json;
+	}
+
+	/** The first markers of each severity behind the totals, capped so a big build stays readable. */
+	private static JsonObject problemSummary(BuildRegistry.Build build) {
+		if (build.errors() < 0) {
+			return null;
+		}
+		return new JsonObject().put("errors", problemList(build.errorProblems())) //$NON-NLS-1$
+				.put("warnings", problemList(build.warningProblems())) //$NON-NLS-1$
+				.put("truncated", Boolean.valueOf(build.problemDetailsTruncated())); //$NON-NLS-1$
+	}
+
+	private static JsonArray problemList(List<BuildRegistry.BuildProblem> problems) {
+		JsonArray array = new JsonArray();
+		for (BuildRegistry.BuildProblem problem : problems) {
+			array.add(new JsonObject().put("severity", problem.severity()) //$NON-NLS-1$
+					.put("path", problem.path()) //$NON-NLS-1$
+					.put("project", problem.project()) //$NON-NLS-1$
+					.put("line", problem.line() < 0 ? null : Integer.valueOf(problem.line())) //$NON-NLS-1$
+					.put("message", problem.message()) //$NON-NLS-1$
+					.put("type", problem.type())); //$NON-NLS-1$
+		}
+		return array;
 	}
 }

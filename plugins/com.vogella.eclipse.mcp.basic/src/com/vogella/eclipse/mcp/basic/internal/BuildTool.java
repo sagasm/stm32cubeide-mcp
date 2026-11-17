@@ -34,7 +34,7 @@ public final class BuildTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Builds the workspace or named projects and reports the outcome. MODIFIES THE WORKSPACE: builders run project code and write build output. The build runs as a job, refresh included, so wait false always returns straight away with a buildId to poll through eclipse_get_build_status. A clean only deletes build state; pass buildAfterClean to rebuild, otherwise the error count afterwards only says that nothing is built. Builder exceptions that never become problem markers are reported in builderFailures, so a build that looks clean but threw is not mistaken for a success."; //$NON-NLS-1$
+		return "Builds the workspace or named projects and reports the outcome. MODIFIES THE WORKSPACE: builders run project code and write build output. The build runs as a job, refresh included, so wait false always returns straight away with a buildId to poll through eclipse_get_build_status. A clean only deletes build state; pass buildAfterClean to rebuild, otherwise the error count afterwards only says that nothing is built. clean true deletes build state before the requested build and still gives a verdict. saveDirtyEditors saves what is on screen before the build, so it compiles the editors rather than the last version on disk. Builder exceptions that never become problem markers are reported in builderFailures, so a build that looks clean but threw is not mistaken for a success. When problems are counted, problemSummary gives the first markers of each severity behind the errors and warnings totals, so a count can be checked instead of trusted."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -51,7 +51,10 @@ public final class BuildTool implements IMcpTool {
 				    "returnProblems": {"type":"boolean","default":true,"description":"Count errors and warnings once the build ended."},
 				    "refresh":        {"type":"boolean","default":true,"description":"Refresh from disk first, so that edits made outside the IDE are built. Scoped to the named projects. The refresh runs inside the job, so it never blocks a call with wait false, and its cost is reported as refreshMillis."},
 				    "includeBuiltProjects":{"type":"boolean","default":false,"description":"List the names of the projects that were built, not only builtProjectCount. A workspace build of a platform workspace names several hundred."},
-				    "buildAfterClean":{"type":"boolean","default":false,"description":"After a clean, build again, the way the 'Build immediately' checkbox of Project > Clean does. Without it a clean only deletes build state, so the error count afterwards means nothing."}
+				    "buildAfterClean":{"type":"boolean","default":false,"description":"After a clean, build again, the way the 'Build immediately' checkbox of Project > Clean does. Without it a clean only deletes build state, so the error count afterwards means nothing."},
+				    "clean":          {"type":"boolean","default":false,"description":"Delete build state before the requested build, the way Project > Clean followed by a build does. Unlike kind 'clean' this still produces a verdict. The clean is kept outside the build delta, so builtProjects names only projects the builders wrote to."},
+				    "saveDirtyEditors":{"type":"boolean","default":false,"description":"Save all dirty editors before the build, so it compiles what is on screen rather than what was last written to disk. Runs on the UI thread without a dialog and waits at most ten seconds. With no workbench it reports that nothing was saved instead of failing the build."},
+				    "problemDetailLimit":{"type":"integer","default":20,"minimum":0,"maximum":200,"description":"How many error and warning markers to keep per severity in problemSummary. 0 keeps only the totals."}
 				  },
 				  "additionalProperties": false
 				}"""; //$NON-NLS-1$
@@ -74,10 +77,17 @@ public final class BuildTool implements IMcpTool {
 		boolean wait = args.getBoolean("wait", true); //$NON-NLS-1$
 		int timeoutSeconds = args.getInt("timeoutSeconds", DEFAULT_TIMEOUT_SECONDS, 1, 3600); //$NON-NLS-1$
 		boolean returnProblems = args.getBoolean("returnProblems", true); //$NON-NLS-1$
+		// Save before scheduling the job: the job holds the build rule, and an editor
+		// save that needs the same rule would wait on the job that is waiting here.
+		BuildRegistry.SaveOutcome save = args.getBoolean("saveDirtyEditors", false) //$NON-NLS-1$
+				? DirtyEditorSaver.saveAll(10)
+				: new BuildRegistry.SaveOutcome(false, true, 0, 0, 0, null);
+		int problemDetailLimit = args.getInt("problemDetailLimit", 20, 0, 200); //$NON-NLS-1$
 
 		BuildRegistry.Build build = BuildRegistry.getInstance()
 				.start(new BuildRegistry.Request(kind, projects, returnProblems, args.getBoolean("refresh", true), //$NON-NLS-1$
-						args.getBoolean("buildAfterClean", false))); //$NON-NLS-1$
+						args.getBoolean("buildAfterClean", false), args.getBoolean("clean", false), save, //$NON-NLS-1$
+						problemDetailLimit));
 		String clamped = null;
 		if (wait) {
 			try {

@@ -64,7 +64,8 @@ public final class RefreshTool implements IMcpTool {
 		// no problem counting: a refresh does not build, so the marker counts would
 		// describe whatever the last build left behind and invite a wrong conclusion
 		BuildRegistry.Build build = BuildRegistry.getInstance()
-				.start(new BuildRegistry.Request(BuildRegistry.REFRESH, projects, false, true, false));
+				.start(new BuildRegistry.Request(BuildRegistry.REFRESH, projects, false, true, false, false,
+						new BuildRegistry.SaveOutcome(false, true, 0, 0, 0, null), 0));
 		if (wait) {
 			try {
 				build.await(CallBudget.boundedWaitSeconds(timeoutSeconds), TimeUnit.SECONDS);

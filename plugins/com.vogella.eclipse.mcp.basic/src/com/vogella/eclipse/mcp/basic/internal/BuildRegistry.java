@@ -71,12 +71,22 @@ public final class BuildRegistry {
 	private BuildRegistry() {
 	}
 
+	/** What a build-time save of dirty editors actually did, if one was asked for. */
+	public record SaveOutcome(boolean requested, boolean available, int dirtyBefore, int dirtyAfter, long millis,
+			String note) {
+	}
+
+	/** One problem marker, so an answer can say what its error and warning counts are made of. */
+	public record BuildProblem(String severity, String path, String project, int line, String message, String type) {
+	}
+
 	/** One build, its outcome, and the problems the workspace had once it ended. */
 	public static final class Build {
 
 		private final String id;
 		private final String kind;
 		private final List<String> projects;
+		private final SaveOutcome save;
 		private final long startedAt = System.currentTimeMillis();
 		private final CountDownLatch finished = new CountDownLatch(1);
 
@@ -92,11 +102,15 @@ public final class BuildRegistry {
 		private volatile List<String> builderFailures = List.of();
 		private volatile int errors = -1;
 		private volatile int warnings = -1;
+		private volatile List<BuildProblem> errorProblems = List.of();
+		private volatile List<BuildProblem> warningProblems = List.of();
+		private volatile boolean problemDetailsTruncated;
 
-		Build(String id, String kind, List<String> projects) {
+		Build(String id, String kind, List<String> projects, SaveOutcome save) {
 			this.id = id;
 			this.kind = kind;
 			this.projects = List.copyOf(projects);
+			this.save = save;
 		}
 
 		public String id() {
@@ -109,6 +123,22 @@ public final class BuildRegistry {
 
 		public List<String> projects() {
 			return projects;
+		}
+
+		public SaveOutcome save() {
+			return save;
+		}
+
+		public List<BuildProblem> errorProblems() {
+			return errorProblems;
+		}
+
+		public List<BuildProblem> warningProblems() {
+			return warningProblems;
+		}
+
+		public boolean problemDetailsTruncated() {
+			return problemDetailsTruncated;
 		}
 
 		public String state() {
@@ -215,7 +245,7 @@ public final class BuildRegistry {
 	 * workspace; {@code kind} is {@code refresh} for a refresh that never builds.
 	 */
 	public record Request(String kind, List<String> projectNames, boolean countProblems, boolean refresh,
-			boolean buildAfterClean) {
+			boolean buildAfterClean, boolean clean, SaveOutcome save, int problemDetailLimit) {
 	}
 
 	/**
@@ -227,7 +257,7 @@ public final class BuildRegistry {
 	 */
 	public synchronized Build start(Request request) {
 		String id = "build-" + ids.incrementAndGet(); //$NON-NLS-1$
-		Build build = new Build(id, request.kind(), request.projectNames());
+		Build build = new Build(id, request.kind(), request.projectNames(), request.save());
 		builds.put(id, build);
 		lastId = id;
 
@@ -299,8 +329,14 @@ public final class BuildRegistry {
 		if (!REFRESH.equals(kind) && "done".equals(state)) { //$NON-NLS-1$
 			long startedBuild = System.currentTimeMillis();
 			ResourceCounter counter = ResourceCounter.forBuild();
-			counter.start();
 			try {
+				// A clean before the requested build deletes markers and build state. Keep it
+				// outside the counter so a project that only lost output is not reported as
+				// one the builders actually wrote to.
+				if (request.clean() && !CLEAN.equals(kind)) {
+					build(workspace, IncrementalProjectBuilder.CLEAN_BUILD, projectNames, failures, monitor);
+				}
+				counter.start();
 				build(workspace, kindOf(kind), projectNames, failures, monitor);
 				if (CLEAN.equals(kind) && request.buildAfterClean()) {
 					build(workspace, IncrementalProjectBuilder.FULL_BUILD, projectNames, failures, monitor);
@@ -326,7 +362,7 @@ public final class BuildRegistry {
 		collectLogged(build, failures);
 		build.builderFailures = List.copyOf(failures);
 		if (request.countProblems()) {
-			countProblems(build, projectNames);
+			countProblems(build, projectNames, request.problemDetailLimit());
 		}
 		build.endedAt = System.currentTimeMillis();
 		build.state = state;
@@ -401,9 +437,11 @@ public final class BuildRegistry {
 		}
 	}
 
-	private static void countProblems(Build build, List<String> projectNames) {
+	private static void countProblems(Build build, List<String> projectNames, int detailLimit) {
 		int errors = 0;
 		int warnings = 0;
+		List<BuildProblem> errorDetails = new ArrayList<>();
+		List<BuildProblem> warningDetails = new ArrayList<>();
 		try {
 			List<IResource> scopes = new ArrayList<>();
 			if (projectNames.isEmpty()) {
@@ -421,16 +459,41 @@ public final class BuildRegistry {
 					int severity = marker.getAttribute(IMarker.SEVERITY, IMarker.SEVERITY_INFO);
 					if (severity == IMarker.SEVERITY_ERROR) {
 						errors++;
+						addDetail(errorDetails, marker, "error", detailLimit); //$NON-NLS-1$
 					} else if (severity == IMarker.SEVERITY_WARNING) {
 						warnings++;
+						addDetail(warningDetails, marker, "warning", detailLimit); //$NON-NLS-1$
 					}
 				}
 			}
 			build.errors = errors;
 			build.warnings = warnings;
+			build.errorProblems = List.copyOf(errorDetails);
+			build.warningProblems = List.copyOf(warningDetails);
+			build.problemDetailsTruncated = errors > errorDetails.size() || warnings > warningDetails.size();
 		} catch (CoreException e) {
 			// the counts stay at -1, which the tool reports as unknown
 		}
+	}
+
+	/** Keeps the first few markers of each severity, so a count can say what it is made of. */
+	private static void addDetail(List<BuildProblem> into, IMarker marker, String severity, int limit) {
+		if (limit <= 0 || into.size() >= limit) {
+			return;
+		}
+		IResource resource = marker.getResource();
+		IProject project = resource == null ? null : resource.getProject();
+		int line = marker.getAttribute(IMarker.LINE_NUMBER, -1);
+		String message = marker.getAttribute(IMarker.MESSAGE, ""); //$NON-NLS-1$
+		String type;
+		try {
+			type = marker.getType();
+		} catch (CoreException e) {
+			// the marker disappeared between findMarkers and this read
+			type = null;
+		}
+		into.add(new BuildProblem(severity, resource == null ? null : resource.getFullPath().toString(),
+				project == null ? null : project.getName(), Integer.valueOf(line), message, type));
 	}
 
 	private static int kindOf(String kind) {

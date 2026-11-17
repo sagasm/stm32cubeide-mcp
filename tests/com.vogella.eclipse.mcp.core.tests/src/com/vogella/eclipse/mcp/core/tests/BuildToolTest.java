@@ -197,4 +197,82 @@ class BuildToolTest {
 		assertFalse(String.valueOf(result.get("builderFailures")).contains(message),
 				"an entry logged before the build must not be reported as a build failure");
 	}
+
+	@Test
+	void cleanFlagRebuildsAndStillGivesAVerdict() throws Exception {
+		fixture.createProject(PROJECT);
+
+		Map<String, Object> result = TestFixture.callAndParse(TOOL,
+				Map.of("project", PROJECT, "kind", "full", "clean", Boolean.TRUE));
+
+		assertEquals("done", result.get("state"));
+		assertNull(result.get("note"), "a clean that rebuilt has rebuilt something to report on");
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void reportsWhetherDirtyEditorsWereSaved() throws Exception {
+		fixture.createProject(PROJECT);
+
+		Map<String, Object> result = TestFixture.callAndParse(TOOL,
+				Map.of("project", PROJECT, "saveDirtyEditors", Boolean.TRUE));
+		Map<String, Object> save = (Map<String, Object>) result.get("save");
+
+		assertEquals("done", result.get("state"));
+		assertNotNull(save);
+		assertEquals(Boolean.TRUE, save.get("requested"));
+		if (!Boolean.TRUE.equals(save.get("available"))) {
+			assertNotNull(save.get("note"), "a save that did not happen must say why");
+		}
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void reportsTheProblemsBehindTheCountsBySeverity() throws Exception {
+		IJavaProject project = fixture.createJavaProject(PROJECT);
+		TestFixture.addType(project, "broken", "Broken", "package broken;\npublic class Broken { Missing field; }\n");
+
+		Map<String, Object> result = TestFixture.callAndParse(TOOL,
+				Map.of("project", PROJECT, "kind", "full", "problemDetailLimit", Integer.valueOf(5)));
+		Map<String, Object> summary = (Map<String, Object>) result.get("problemSummary");
+
+		assertTrue(((Number) result.get("errors")).intValue() > 0);
+		assertNotNull(summary);
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> errors = (List<Map<String, Object>>) summary.get("errors");
+		assertFalse(errors.isEmpty());
+		assertTrue(errors.size() <= 5, "detail limit was 5, got " + errors.size());
+		assertEquals("error", errors.get(0).get("severity"));
+		assertNotNull(errors.get(0).get("message"));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void problemDetailLimitZeroKeepsOnlyTheTotals() throws Exception {
+		IJavaProject project = fixture.createJavaProject(PROJECT);
+		TestFixture.addType(project, "broken", "Broken", "package broken;\npublic class Broken { Missing field; }\n");
+
+		Map<String, Object> result = TestFixture.callAndParse(TOOL,
+				Map.of("project", PROJECT, "kind", "full", "problemDetailLimit", Integer.valueOf(0)));
+		Map<String, Object> summary = (Map<String, Object>) result.get("problemSummary");
+
+		assertTrue(((Number) result.get("errors")).intValue() > 0);
+		assertEquals(List.of(), summary.get("errors"));
+		assertEquals(List.of(), summary.get("warnings"));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void singleProjectBuildNamesOnlyTheProjectItBuilt() throws Exception {
+		IJavaProject project = fixture.createJavaProject(PROJECT);
+		TestFixture.addType(project, "built", "Built", "package built;\npublic class Built { }\n");
+
+		Map<String, Object> result = TestFixture.callAndParse(TOOL,
+				Map.of("project", PROJECT, "kind", "full", "includeBuiltProjects", Boolean.TRUE));
+		List<String> built = (List<String>) result.get("builtProjects");
+
+		assertEquals(List.of(PROJECT), result.get("projects"));
+		assertTrue(built.contains(PROJECT), "got " + built);
+		assertTrue(built.stream().allMatch(PROJECT::equals), "only the named project should be built, got " + built);
+	}
 }
