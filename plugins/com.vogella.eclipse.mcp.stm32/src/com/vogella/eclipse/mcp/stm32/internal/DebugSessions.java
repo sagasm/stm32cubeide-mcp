@@ -80,6 +80,27 @@ public final class DebugSessions {
 		return SESSIONS.get(sessionId);
 	}
 
+	/**
+	 * True only when the DSF services used by the debug tools are all available.
+	 * A GdbLaunch's session becomes active before these services exist, so this
+	 * is the reliable readiness check when picking a freshly started launch.
+	 */
+	public static boolean isDsfReady(GdbLaunch launch) {
+		DsfSession session = launch.getSession();
+		if (session == null || !session.isActive()) {
+			return false;
+		}
+		DsfServicesTracker tracker = servicesTracker(session);
+		try {
+			return tracker.getService(IProcesses.class) != null
+					&& tracker.getService(IRunControl.class) != null
+					&& tracker.getService(IStack.class) != null
+					&& tracker.getService(ICommandControlService.class) != null;
+		} finally {
+			tracker.dispose();
+		}
+	}
+
 	/** Describes every known session, oldest first, adopting sessions started outside this bundle. */
 	public static JsonArray describeAll() {
 		// A session the user started from the IDE Debug button is not in the

@@ -36,7 +36,7 @@ public final class BuildFlashTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Build and flash an STM32 project by pressing the IDE's Debug button on one of the launch configurations listed by stm32_list_launch_configurations (e.g. 'kz036 Debug'). Starting the debug session is what builds the saved resources and downloads the ELF to Flash - unsaved editor buffers are NOT built. THIS WRITES THE TARGET FLASH and holds the debug probe until the session is terminated. If a session for this configuration is already active the IDE's own terminate-and-relaunch is used, so no extra terminate call and no modal error dialogs are needed. Where it stops afterwards is decided by the launch configuration, exactly as when you click Debug in the IDE. dryRun defaults to true and only returns the plan. The real call returns an operationId immediately; poll stm32_flash_status until it is done, then use the sessionId there with the other stm32_debug_* tools."; //$NON-NLS-1$
+		return "Build and flash an STM32 project by starting one of the ST launch configurations listed by stm32_list_launch_configurations (e.g. 'kz036 Debug'). Starting the debug session is what builds the saved resources and downloads the ELF to Flash - unsaved editor buffers are NOT built. THIS WRITES THE TARGET FLASH and holds the debug probe until the session is terminated. If a session for this configuration is already active it is terminated and waited for to finish before the new launch starts, replaying the IDE's Terminate-and-Relaunch button without the modal error dialog. Where it stops afterwards is decided by the launch configuration, exactly as when you click Debug in the IDE. dryRun defaults to true and only returns the plan. The real call returns an operationId immediately; poll stm32_flash_status until it is done, then use the sessionId there with the other stm32_debug_* tools."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -95,7 +95,7 @@ public final class BuildFlashTool implements IMcpTool {
 		}
 
 		if (dryRun) {
-			boolean alreadyRunning = hasActiveLaunch(configuration);
+			boolean alreadyRunning = !activeLaunches(configuration).isEmpty();
 			plan.put("dryRun", true);
 			plan.put("alreadyActive", alreadyRunning);
 			plan.put("note", "Nothing was built or flashed. Pass dryRun:false to "
@@ -133,11 +133,36 @@ public final class BuildFlashTool implements IMcpTool {
 		return matches.size() == 1 ? matches.get(0) : null;
 	}
 
-	/** An active launch of the same configuration, which the IDE will relaunch. */
-	private static boolean hasActiveLaunch(ILaunchConfiguration configuration) {
+	/** Active launches of the same configuration, which must be terminated first. */
+	private static List<ILaunch> activeLaunches(ILaunchConfiguration configuration) {
+		List<ILaunch> active = new ArrayList<>();
 		for (ILaunch launch : DebugPlugin.getDefault().getLaunchManager().getLaunches()) {
 			if (!launch.isTerminated() && configuration.equals(launch.getLaunchConfiguration())) {
+				active.add(launch);
+			}
+		}
+		return active;
+	}
+
+	/** Waits until every launch has really terminated (IDE button's postExecute). */
+	private static boolean awaitTerminated(List<ILaunch> launches, int seconds) {
+		long deadline = System.currentTimeMillis() + seconds * 1000L;
+		while (System.currentTimeMillis() < deadline) {
+			boolean allTerminated = true;
+			for (ILaunch launch : launches) {
+				if (!launch.isTerminated()) {
+					allTerminated = false;
+					break;
+				}
+			}
+			if (allTerminated) {
 				return true;
+			}
+			try {
+				Thread.sleep(300);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				return false;
 			}
 		}
 		return false;
@@ -150,15 +175,25 @@ public final class BuildFlashTool implements IMcpTool {
 				try {
 					removeTerminatedLaunches();
 					ILaunchManager manager = DebugPlugin.getDefault().getLaunchManager();
-					boolean relaunch = hasActiveLaunch(configuration);
-					Set<ILaunch> before = new HashSet<>(Arrays.asList(manager.getLaunches()));
-					PlatformUI.getWorkbench().getDisplay().asyncExec(() -> {
-						if (relaunch) {
-							DebugUITools.reLaunch(configuration, ILaunchManager.DEBUG_MODE);
-						} else {
-							DebugUITools.launch(configuration, ILaunchManager.DEBUG_MODE);
+					// Replay the IDE's Terminate-and-Relaunch button exactly:
+					// terminate the active launch, WAIT for it to really finish
+					// (the button uses the IRequest postExecute callback), then
+					// start a fresh launch. DebugUITools.reLaunch does not wait
+					// and pops "Termination of previous launch did not complete
+					// successfully" when the old ST launch is still winding down.
+					List<ILaunch> active = activeLaunches(configuration);
+					for (ILaunch old : active) {
+						if (old.canTerminate()) {
+							old.terminate();
 						}
-					});
+					}
+					if (!active.isEmpty() && !awaitTerminated(active, 45)) {
+						flash.fail("The previous launch did not terminate within 45 s; nothing was started."); //$NON-NLS-1$
+						return org.eclipse.core.runtime.Status.OK_STATUS;
+					}
+					Set<ILaunch> before = new HashSet<>(Arrays.asList(manager.getLaunches()));
+					PlatformUI.getWorkbench().getDisplay()
+							.asyncExec(() -> DebugUITools.launch(configuration, ILaunchManager.DEBUG_MODE));
 					ILaunch found = awaitLaunch(manager, before, 90);
 					if (found == null) {
 						flash.fail("No debug launch appeared within 90 s; the build or download may have failed."); //$NON-NLS-1$
@@ -193,11 +228,12 @@ public final class BuildFlashTool implements IMcpTool {
 				if (before.contains(launch)) {
 					continue;
 				}
-				// Prefer the launch whose DSF session is active: ST launches can
-				// create an outer shell first, and only the real GdbLaunch is
-				// usable by the debug tools.
+				// Prefer the launch whose DSF services are actually ready: ST
+				// creates an outer launching shell first, and getSession().isActive()
+				// becomes true before the services the debug tools need exist.
+				// Use the same service set as DebugSessions.describeDsf.
 				if (launch instanceof org.eclipse.cdt.dsf.gdb.launching.GdbLaunch gdb
-						&& gdb.getSession() != null && gdb.getSession().isActive()) {
+						&& DebugSessions.isDsfReady(gdb)) {
 					return launch;
 				}
 				if (fallback == null) {
