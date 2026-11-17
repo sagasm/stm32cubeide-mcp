@@ -6,5 +6,7 @@
       <tool class="com.vogella.eclipse.mcp.cdt.internal.FindReferencesTool"/>
       <tool class="com.vogella.eclipse.mcp.cdt.internal.CdtOpenSymbolTool"/>
       <tool class="com.vogella.eclipse.mcp.cdt.internal.CdtTypeMembersTool"/>
+      <tool class="com.vogella.eclipse.mcp.cdt.internal.CdtCallHierarchyTool"/>
+      <tool class="com.vogella.eclipse.mcp.cdt.internal.CdtOutlineTool"/>
    </extension>
 </plugin>
