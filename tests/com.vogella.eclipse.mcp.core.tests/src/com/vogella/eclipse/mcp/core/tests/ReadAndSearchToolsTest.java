@@ -81,6 +81,33 @@ class ReadAndSearchToolsTest {
 	}
 
 	@Test
+	void includeDirtyFallsBackToDiskWhenNoEditorBufferExists() throws Exception {
+		IProject project = fixture.createProject(PROJECT);
+		write(project, "dirty.txt", "saved\n");
+
+		Map<String, Object> result = TestFixture.callAndParse("eclipse_read_file",
+				Map.of("path", "/" + PROJECT + "/dirty.txt", "includeDirty", Boolean.TRUE));
+
+		assertEquals(Boolean.TRUE, result.get("read"));
+		assertEquals("disk", result.get("source"));
+		assertEquals(Boolean.FALSE, result.get("dirty"));
+		assertEquals("saved", result.get("content"));
+		assertTrue(String.valueOf(result.get("note")).contains("No text editor buffer"), result.toString());
+	}
+
+	@Test
+	void editorBufferOnlyRefusesWhenNoEditorIsOpen() throws Exception {
+		IProject project = fixture.createProject(PROJECT);
+		write(project, "buffered.txt", "saved\n");
+
+		McpToolResult result = TestFixture.call("eclipse_read_file",
+				Map.of("path", "/" + PROJECT + "/buffered.txt", "editorBufferOnly", Boolean.TRUE));
+
+		assertTrue(result.isError(), result.text());
+		assertTrue(result.text().contains("No open text editor buffer"), result.text());
+	}
+
+	@Test
 	void refusesABinaryFileRatherThanManglingIt() throws Exception {
 		IProject project = fixture.createProject(PROJECT);
 		IFile file = project.getFile("thing.bin");

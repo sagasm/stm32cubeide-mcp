@@ -30,7 +30,7 @@ public final class ReadFileTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Reads a workspace file by workspace path, the same path form eclipse_open takes. Read-only. This exists because a client is not always on the same machine as the IDE, and once the window is hidden there is no filesystem to fall back on; it is also the only way to look at the plugin.xml or .exsd that eclipse_list_declarations cites as evidence, in the same IDE the verdict came from rather than in your own copy of the tree. The file is read through the workspace, so it uses the encoding Eclipse has for it, which a naive read of the bytes gets wrong silently for properties files and anything not UTF-8. Binary files are reported as binary rather than returned as a mangled string."; //$NON-NLS-1$
+		return "Reads a workspace file by workspace path, the same path form eclipse_open takes. Read-only. This exists because a client is not always on the same machine as the IDE, and once the window is hidden there is no filesystem to fall back on; it is also the only way to look at the plugin.xml or .exsd that eclipse_list_declarations cites as evidence, in the same IDE the verdict came from rather than in your own copy of the tree. The saved file is read through the workspace, so it uses the encoding Eclipse has for it, which a naive read of the bytes gets wrong silently for properties files and anything not UTF-8. Binary files are reported as binary rather than returned as a mangled string. includeDirty reads the open text editor's buffer when it has unsaved changes and marks dirty:true, so a client can review edits before saving; editorBufferOnly insists on that buffer and refuses when no text editor is open, instead of silently falling back to disk. offset/limit keep the answer bounded on large files."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -44,7 +44,9 @@ public final class ReadFileTool implements IMcpTool {
 				    "offset":   {"type":"integer","minimum":1,"description":"First line to return, 1 based. Omit for the start of the file."},
 				    "limit":    {"type":"integer","minimum":1,"maximum":100000,"description":"How many lines to return. Omit for the rest of the file."},
 				    "maxBytes": {"type":"integer","minimum":1,"maximum":10000000,"default":1000000,"description":"Refuse rather than return more than this."},
-				    "refresh":  {"type":"boolean","default":true,"description":"Read outside changes into the workspace first."}
+				    "refresh":  {"type":"boolean","default":true,"description":"Read outside changes into the workspace first."},
+				    "includeDirty": {"type":"boolean","default":false,"description":"When a text editor is open on the file with unsaved changes, read its buffer instead of the saved file and mark dirty:true. Falls back to the saved file when no dirty editor exists."},
+				    "editorBufferOnly": {"type":"boolean","default":false,"description":"Read only the open text editor buffer, never the saved file. Reports an error when no text editor is open on the file."}
 				  },
 				  "additionalProperties": false
 				}"""; //$NON-NLS-1$
@@ -73,30 +75,56 @@ public final class ReadFileTool implements IMcpTool {
 		int maxBytes = args.getInt("maxBytes", DEFAULT_MAX_BYTES, 1, 10_000_000); //$NON-NLS-1$
 		int offset = args.getInt("offset", 1, 1, Integer.MAX_VALUE); //$NON-NLS-1$
 		int limit = args.getInt("limit", -1, -1, 100_000); //$NON-NLS-1$
-
-		byte[] bytes;
-		try (InputStream in = file.getContents(true)) {
-			bytes = in.readNBytes(maxBytes + 1);
-		} catch (CoreException | IOException e) {
-			return McpToolResult.error("Could not read '%s': %s".formatted(path, e.getMessage())); //$NON-NLS-1$
+		boolean includeDirty = args.getBoolean("includeDirty", false); //$NON-NLS-1$
+		boolean editorBufferOnly = args.getBoolean("editorBufferOnly", false); //$NON-NLS-1$
+		DirtyEditorReader.Buffer buffer = (includeDirty || editorBufferOnly)
+				? DirtyEditorReader.read(file, 10)
+				: null;
+		if (editorBufferOnly && buffer == null) {
+			return McpToolResult.error("No open text editor buffer for '%s'. Open the file in an editor first, or read the saved file by leaving editorBufferOnly off." //$NON-NLS-1$
+					.formatted(path));
+		}
+		boolean fromBuffer = buffer != null && (editorBufferOnly || buffer.dirty());
+		String charset = FileSupport.charset(file);
+		String content;
+		int bytesRead;
+		if (fromBuffer) {
+			content = buffer.content();
+			bytesRead = content.getBytes(Charset.forName(charset)).length;
+		} else {
+			byte[] bytes;
+			try (InputStream in = file.getContents(true)) {
+				bytes = in.readNBytes(maxBytes + 1);
+			} catch (CoreException | IOException e) {
+				return McpToolResult.error("Could not read '%s': %s".formatted(path, e.getMessage())); //$NON-NLS-1$
+			}
+			bytesRead = Math.min(bytes.length, maxBytes);
+			if (bytes.length > maxBytes) {
+				return McpToolResult.of(new JsonObject().put("path", file.getFullPath().toString()) //$NON-NLS-1$
+						.put("bytes", Integer.valueOf(bytesRead)).put("read", Boolean.FALSE) //$NON-NLS-1$
+						.put("reason", "The file is larger than maxBytes (%d). Raise it, or read a line range." //$NON-NLS-1$ //$NON-NLS-2$
+								.formatted(Integer.valueOf(maxBytes)))
+						.toString());
+			}
+			if (FileSupport.isBinary(bytes)) {
+				return McpToolResult.of(new JsonObject().put("path", file.getFullPath().toString()) //$NON-NLS-1$
+						.put("bytes", Integer.valueOf(bytesRead)).put("read", Boolean.FALSE) //$NON-NLS-1$
+						.put("binary", Boolean.TRUE) //$NON-NLS-1$
+						.put("reason", "The file contains NUL bytes, so it is binary and is not returned as text. For a PNG, JPEG, GIF or WebP use eclipse_read_image.") //$NON-NLS-1$ //$NON-NLS-2$
+						.toString());
+			}
+			content = new String(bytes, Charset.forName(charset));
 		}
 		JsonObject result = new JsonObject().put("path", file.getFullPath().toString()) //$NON-NLS-1$
-				.put("bytes", Integer.valueOf(Math.min(bytes.length, maxBytes))); //$NON-NLS-1$
-		if (bytes.length > maxBytes) {
+				.put("bytes", Integer.valueOf(bytesRead)); //$NON-NLS-1$
+		if (fromBuffer && bytesRead > maxBytes) {
 			return McpToolResult.of(result.put("read", Boolean.FALSE) //$NON-NLS-1$
-					.put("reason", "The file is larger than maxBytes (%d). Raise it, or read a line range." //$NON-NLS-1$ //$NON-NLS-2$
+					.put("source", "editorBuffer") //$NON-NLS-1$
+					.put("dirty", Boolean.valueOf(buffer.dirty())) //$NON-NLS-1$
+					.put("reason", "The editor buffer is larger than maxBytes (%d). Raise it, or read a line range." //$NON-NLS-1$ //$NON-NLS-2$
 							.formatted(Integer.valueOf(maxBytes)))
 					.toString());
 		}
-		if (FileSupport.isBinary(bytes)) {
-			return McpToolResult.of(result.put("read", Boolean.FALSE) //$NON-NLS-1$
-					.put("binary", Boolean.TRUE) //$NON-NLS-1$
-					.put("reason", "The file contains NUL bytes, so it is binary and is not returned as text. For a PNG, JPEG, GIF or WebP use eclipse_read_image.") //$NON-NLS-1$ //$NON-NLS-2$
-					.toString());
-		}
-
-		String charset = FileSupport.charset(file);
-		String content = new String(bytes, Charset.forName(charset));
 		String[] lines = content.split("\n", -1); //$NON-NLS-1$
 		int total = lines.length;
 		int from = Math.min(offset - 1, total);
@@ -108,13 +136,18 @@ public final class ReadFileTool implements IMcpTool {
 				text.append('\n');
 			}
 		}
-		return McpToolResult.of(result.put("read", Boolean.TRUE) //$NON-NLS-1$
+		result.put("read", Boolean.TRUE) //$NON-NLS-1$
+				.put("source", fromBuffer ? "editorBuffer" : "disk") //$NON-NLS-1$ //$NON-NLS-2$
+				.put("dirty", Boolean.valueOf(fromBuffer && buffer.dirty())) //$NON-NLS-1$
 				.put("charset", charset) //$NON-NLS-1$
 				.put("totalLines", Integer.valueOf(total)) //$NON-NLS-1$
 				.put("firstLine", Integer.valueOf(from + 1)) //$NON-NLS-1$
 				.put("lastLine", Integer.valueOf(to)) //$NON-NLS-1$
 				.put("truncated", Boolean.valueOf(to < total || from > 0)) //$NON-NLS-1$
-				.put("content", text.toString()) //$NON-NLS-1$
-				.toString());
+				.put("content", text.toString()); //$NON-NLS-1$
+		if (includeDirty && buffer == null) {
+			result.put("note", "No text editor buffer was available; the saved file was read instead."); //$NON-NLS-1$
+		}
+		return McpToolResult.of(result.toString());
 	}
 }
