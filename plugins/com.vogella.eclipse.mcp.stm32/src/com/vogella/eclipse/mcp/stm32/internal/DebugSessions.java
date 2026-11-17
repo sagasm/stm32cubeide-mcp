@@ -7,6 +7,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.eclipse.cdt.dsf.concurrent.DataRequestMonitor;
 import org.eclipse.cdt.dsf.concurrent.ImmediateDataRequestMonitor;
@@ -663,6 +665,42 @@ public final class DebugSessions {
 		} catch (Exception e) {
 			throw new CoreException(Status.error("Evaluating the expression failed: " + e.getMessage()));
 		}
+	}
+
+	/**
+	 * Only the value gdb prints for an expression. The JsonObject from evaluateDsf is
+	 * caller-owned, so remove() is a safe read: JsonObject has no getter.
+	 */
+	public static String evaluateValueDsf(GdbLaunch launch, String expression, int threadIndex) throws CoreException {
+		JsonObject result = evaluateDsf(launch, expression, threadIndex);
+		Object value = result.remove("value"); //$NON-NLS-1$
+		return value == null ? null : String.valueOf(value);
+	}
+
+	/** Resolves a C symbol to its absolute address, trying '&symbol' then 'symbol'. */
+	public static long resolveAddressDsf(GdbLaunch launch, String symbol) throws CoreException {
+		if (symbol == null || symbol.isBlank()) {
+			throw new CoreException(Status.error("A symbol is required to resolve an address.")); //$NON-NLS-1$
+		}
+		Pattern address = Pattern.compile("0[xX]([0-9a-fA-F]+)"); //$NON-NLS-1$
+		String last = null;
+		for (String expression : List.of("&" + symbol, symbol)) { //$NON-NLS-1$
+			try {
+				String value = evaluateValueDsf(launch, expression, 0);
+				if (value == null || value.isBlank()) {
+					continue;
+				}
+				Matcher matcher = address.matcher(value);
+				if (matcher.find()) {
+					return Long.parseUnsignedLong(matcher.group(1), 16);
+				}
+				last = value;
+			} catch (CoreException e) {
+				last = e.getMessage();
+			}
+		}
+		throw new CoreException(Status.error("Cannot resolve symbol '" + symbol //$NON-NLS-1$
+				+ "' to an address (last gdb answer: " + last + ").")); //$NON-NLS-1$
 	}
 
 	/** Issues -data-evaluate-expression on a resolved frame and builds the result JSON. */

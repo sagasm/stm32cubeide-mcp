@@ -12,5 +12,7 @@
       <tool class="com.vogella.eclipse.mcp.stm32.internal.BuildFlashTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.FlashStatusTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.DelegateCheckTool"/>
+      <tool class="com.vogella.eclipse.mcp.stm32.internal.SfrReadTool"/>
+      <tool class="com.vogella.eclipse.mcp.stm32.internal.MemoryDumpTool"/>
    </extension>
 </plugin>
