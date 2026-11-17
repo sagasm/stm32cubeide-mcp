@@ -32,7 +32,9 @@ public final class FindReferencesTool implements IMcpTool {
     @Override
     public String getDescription() {
         return "Finds all references (call sites and uses) of a C/C++ symbol in the CDT index and "
-                + "returns their locations (file path and line number). Optionally scoped to a single project.";
+                + "returns their locations (file path and line number). Optionally scoped to a single project. "
+                + "Each reference carries the source line it points at, so a client can tell a call from a "
+                + "declaration without reopening the file; pass includeLineText false for a compact list.";
     }
 
     @Override
@@ -42,10 +44,11 @@ public final class FindReferencesTool implements IMcpTool {
                   "type": "object",
                   "required": ["name"],
                   "properties": {
-                    "name":          {"type":"string","description":"Substring of the symbol name whose references to find."},
-                    "project":       {"type":"string","description":"Optional C/C++ project name to scope the search."},
-                    "caseSensitive": {"type":"boolean","default":true},
-                    "maxResults":    {"type":"integer","default":50,"minimum":1,"maximum":500}
+                    "name":            {"type":"string","description":"Substring of the symbol name whose references to find."},
+                    "project":         {"type":"string","description":"Optional C/C++ project name to scope the search."},
+                    "caseSensitive":   {"type":"boolean","default":true},
+                    "includeLineText": {"type":"boolean","default":true,"description":"Attach the source line of each reference."},
+                    "maxResults":      {"type":"integer","default":50,"minimum":1,"maximum":500}
                   },
                   "additionalProperties": false
                 }""";
@@ -60,6 +63,7 @@ public final class FindReferencesTool implements IMcpTool {
         }
         String project = args.getString("project");
         boolean caseSensitive = args.getBoolean("caseSensitive", true);
+        boolean includeLineText = args.getBoolean("includeLineText", true);
         int maxResults = args.getInt("maxResults", 50, 1, 500);
 
         List<ICProject> projects;
@@ -90,10 +94,24 @@ public final class FindReferencesTool implements IMcpTool {
                 IIndexBinding[] bindings = index.findBindings(pattern, caseSensitive, IndexFilter.ALL, monitor);
                 for (IIndexBinding b : bindings) {
                     for (IIndexName n : index.findReferences(b)) {
+                        if (monitor.isCanceled()) {
+                            return McpToolResult.error("The request was cancelled.");
+                        }
                         if (total >= maxResults) {
                             break;
                         }
-                        matches.add(CdtIndexHelper.describe(n, b, false));
+                        JsonObject reference = CdtIndexHelper.describe(n, b, false);
+                        if (includeLineText) {
+                            String path = CdtIndexHelper.locationPath(n);
+                            int line = CdtIndexHelper.locationLine(n);
+                            if (!path.isEmpty() && line > 0) {
+                                String source = CdtIndexHelper.lineText(path, line);
+                                if (source != null) {
+                                    reference.put("lineText", source.stripTrailing());
+                                }
+                            }
+                        }
+                        matches.add(reference);
                         total++;
                     }
                     if (total >= maxResults) {

@@ -208,6 +208,20 @@ final class CdtIndexHelper {
         return null;
     }
 
+    /** Reads one source line, without a line-number prefix, for a reference hit. */
+    static String lineText(String path, int line) {
+        String content = readText(path);
+        if (content == null || line < 1) {
+            return null;
+        }
+        String[] lines = content.split("\n", -1);
+        if (line > lines.length) {
+            return null;
+        }
+        String text = lines[line - 1];
+        return text.endsWith("\r") ? text.substring(0, text.length() - 1) : text;
+    }
+
     /** Reads `context` lines around a 1-based `centerLine`, each prefixed with its line number. */
     static String readLinesAround(String path, int centerLine, int context) {
         String content = readText(path);

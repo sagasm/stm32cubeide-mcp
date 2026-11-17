@@ -1,7 +1,9 @@
 package com.vogella.eclipse.mcp.cdt.internal;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import org.eclipse.cdt.core.dom.ast.IBinding;
@@ -136,20 +138,29 @@ public final class CdtTypeMembersTool implements IMcpTool {
         return McpToolResult.of(result.toString());
     }
 
-    private static ICompositeType asComposite(IIndexBinding b) {
-        if (b instanceof ITypedef) {
-            IType t = ((ITypedef) b).getType();
-            return t instanceof ICompositeType ? (ICompositeType) t : null;
+    /** Resolves chains of typedefs, e.g. an anonymous struct named A and then typedef A B and typedef B C. */
+    private static IType unwrapTypedefs(IType type) {
+        Set<String> seen = new HashSet<>();
+        int hops = 0;
+        while (type instanceof ITypedef typedef && hops++ < 16) {
+            if (!seen.add(typedef.getName())) {
+                break;
+            }
+            type = typedef.getType();
         }
-        return b instanceof ICompositeType ? (ICompositeType) b : null;
+        return type;
+    }
+
+    private static ICompositeType asComposite(IIndexBinding b) {
+        IType type = b instanceof ITypedef ? unwrapTypedefs((ITypedef) b)
+                : b instanceof IType ? (IType) b : null;
+        return type instanceof ICompositeType ? (ICompositeType) type : null;
     }
 
     private static IEnumeration asEnum(IIndexBinding b) {
-        if (b instanceof ITypedef) {
-            IType t = ((ITypedef) b).getType();
-            return t instanceof IEnumeration ? (IEnumeration) t : null;
-        }
-        return b instanceof IEnumeration ? (IEnumeration) b : null;
+        IType type = b instanceof ITypedef ? unwrapTypedefs((ITypedef) b)
+                : b instanceof IType ? (IType) b : null;
+        return type instanceof IEnumeration ? (IEnumeration) type : null;
     }
 
     private static JsonObject describeType(IIndex index, IIndexBinding b, ICompositeType type, int maxMembers)
