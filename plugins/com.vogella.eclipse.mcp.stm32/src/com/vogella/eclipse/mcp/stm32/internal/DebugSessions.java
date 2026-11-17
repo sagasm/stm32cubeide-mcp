@@ -67,6 +67,24 @@ public final class DebugSessions {
 
 	private static final Map<String, ILaunch> SESSIONS = new ConcurrentHashMap<>();
 
+	/**
+	 * The gdb thread-group id learned while the inferior was suspended, keyed by
+	 * DsfSession id. A free-running target makes {@code -list-thread-groups} answer
+	 * with an empty group list, which otherwise looks like "still launching" and
+	 * leaves no context to steer. Remembering the last id lets both state reads and
+	 * steering rebuild the container context after a continue.
+	 */
+	private static final Map<String, String> GROUP_IDS = new ConcurrentHashMap<>();
+
+	/**
+	 * Execution contexts last seen while the inferior was suspended, keyed like
+	 * {@link #GROUP_IDS}. Once the target resumes, {@code IProcesses} refuses to
+	 * enumerate contexts ("Target not available"), yet {@code IRunControl} still
+	 * accepts the same context objects for suspend/step. Keeping them lets pause
+	 * and step work on a running target.
+	 */
+	private static final Map<String, List<IRunControl.IExecutionDMContext>> EXEC_CONTEXTS = new ConcurrentHashMap<>();
+
 	private DebugSessions() {
 	}
 
@@ -213,7 +231,8 @@ public final class DebugSessions {
 					@Override
 					protected void handleCompleted() {
 						collectDsfState(launch, processes, runControl, stack, commandControl,
-						commandFactory != null ? commandFactory : new CommandFactory(), miProcesses, o, rm);
+						commandFactory != null ? commandFactory : new CommandFactory(), miProcesses, o, rm,
+						session.getId());
 					}
 				});
 			}
@@ -254,7 +273,7 @@ public final class DebugSessions {
 	/** Runs on the DSF executor: asks the DSF services for target state and the top frame. */
 	private static void collectDsfState(GdbLaunch launch, IProcesses processes, IRunControl runControl, IStack stack,
 			ICommandControlService commandControl, CommandFactory commandFactory, IMIProcesses miProcesses,
-			JsonObject o, DataRequestMonitor<JsonObject> rm) {
+			JsonObject o, DataRequestMonitor<JsonObject> rm, String sessionKey) {
 		o.put("canTerminate", launch.canTerminate());
 		o.put("rootContext", String.valueOf(commandControl.getContext()));
 		try {
@@ -289,16 +308,33 @@ public final class DebugSessions {
 											if (info != null && info.getGroupList() != null && info.getGroupList().length > 0) {
 												groupId = info.getGroupList()[0].getGroupId();
 											}
+											if (groupId != null) {
+												GROUP_IDS.put(sessionKey, groupId);
+											} else {
+												// A running target makes -list-thread-groups empty; reuse the id
+												// learned while it was suspended so the context query still works.
+												groupId = GROUP_IDS.get(sessionKey);
+											}
 											queryExecutionDsfContexts(processes, runControl, commandControl, groupId,
 													miProcesses,
 					new ImmediateDataRequestMonitor<IRunControl.IExecutionDMContext[]>() {
 				@Override
 				protected void handleSuccess() {
 					IRunControl.IExecutionDMContext[] contexts = getData();
+					if (contexts.length > 0) {
+						List<IRunControl.IExecutionDMContext> snapshot = new ArrayList<>();
+						for (IRunControl.IExecutionDMContext context : contexts) {
+							snapshot.add(context);
+						}
+						EXEC_CONTEXTS.put(sessionKey, snapshot);
+					}
 					if (contexts.length == 0) {
-						// Connected but nothing reported as being debugged yet:
-						// the inferior is still being loaded or started.
-						o.put("state", launch.isTerminated() ? "terminated" : "launching");
+						// No context can mean two things: the inferior has not started
+						// yet (launching), or it is running and gdb no longer reports a
+						// thread group. A group id cached from an earlier suspended
+						// read tells the two apart: with one, the target was already up.
+						o.put("state", launch.isTerminated() ? "terminated"
+								: GROUP_IDS.containsKey(sessionKey) ? "running" : "launching");
 						rm.done(o);
 						return;
 					}
@@ -358,8 +394,19 @@ public final class DebugSessions {
 
 				@Override
 				protected void handleFailure() {
-					o.put("stateError", String.valueOf(getStatus().getMessage()));
-					o.put("state", launch.isTerminated() ? "terminated" : "launching");
+					// IProcesses refuses a running target ("Target not available"), so a
+					// failure here is not proof the inferior never started. A cached group
+					// id means it did start and is now running: that is a normal state, not
+					// an error, so keep the diagnostic as a note instead of a stateError.
+					String detail = String.valueOf(getStatus().getMessage());
+					boolean running = GROUP_IDS.containsKey(sessionKey);
+					if (running && !launch.isTerminated()) {
+						o.put("stateNote", "No suspended context (target is running): " + detail);
+						o.put("state", "running");
+					} else {
+						o.put("stateError", detail);
+						o.put("state", launch.isTerminated() ? "terminated" : "launching");
+					}
 					rm.done(o);
 				}
 					});
@@ -519,6 +566,13 @@ public final class DebugSessions {
 								if (info != null && info.getGroupList() != null && info.getGroupList().length > 0) {
 									groupId = info.getGroupList()[0].getGroupId();
 								}
+								if (groupId != null) {
+									GROUP_IDS.put(session.getId(), groupId);
+								} else {
+									// A running target stops reporting thread groups; steer through the
+									// id remembered from when it was suspended instead of failing.
+									groupId = GROUP_IDS.get(session.getId());
+								}
 								if (groupId == null) {
 									rm.setStatus(Status.error("gdb reports no thread-group to steer."));
 									rm.done();
@@ -533,24 +587,26 @@ public final class DebugSessions {
 											@Override
 											protected void handleSuccess() {
 												List<IRunControl.IExecutionDMContext> execs = new ArrayList<>();
-												for (IDMContext ctx : getData()) {
-													if (ctx instanceof IRunControl.IExecutionDMContext exec) {
-														execs.add(exec);
+												IDMContext[] found = getData();
+												if (found != null) {
+													for (IDMContext ctx : found) {
+														if (ctx instanceof IRunControl.IExecutionDMContext exec) {
+															execs.add(exec);
+														}
 													}
 												}
 												if (execs.isEmpty()) {
-													rm.setStatus(Status.error("No execution context to steer."));
-													rm.done();
+													steerFromCache(runControl, session.getId(), action, threadIndex, rm);
 													return;
 												}
+												EXEC_CONTEXTS.put(session.getId(), execs);
 												steer(runControl, action, threadIndex, execs, rm);
-											}
+												}
 
-											@Override
-											protected void handleFailure() {
-												rm.setStatus(getStatus());
-												rm.done();
-											}
+												@Override
+												protected void handleFailure() {
+												steerFromCache(runControl, session.getId(), action, threadIndex, rm);
+												}
 										});
 							}
 						});
@@ -562,6 +618,18 @@ public final class DebugSessions {
 		} catch (Exception e) {
 			throw new CoreException(Status.error("Steering the DSF target failed: " + e.getMessage()));
 		}
+	}
+
+	/** Steers through contexts remembered from the last suspended read, for a running target. */
+	private static void steerFromCache(IRunControl runControl, String sessionKey, String action, int threadIndex,
+			DataRequestMonitor<Void> rm) {
+		List<IRunControl.IExecutionDMContext> cached = EXEC_CONTEXTS.get(sessionKey);
+		if (cached == null || cached.isEmpty()) {
+			rm.setStatus(Status.error("No execution context to steer: the target is running and none was seen suspended."));
+			rm.done();
+			return;
+		}
+		steer(runControl, action, threadIndex, cached, rm);
 	}
 
 	private static void steer(IRunControl runControl, String action, int threadIndex,
