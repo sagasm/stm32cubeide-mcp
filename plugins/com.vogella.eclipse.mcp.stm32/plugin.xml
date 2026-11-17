@@ -9,6 +9,8 @@
       <tool class="com.vogella.eclipse.mcp.stm32.internal.FramesTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.BreakpointsTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.ReadMemoryTool"/>
+      <tool class="com.vogella.eclipse.mcp.stm32.internal.BuildFlashTool"/>
+      <tool class="com.vogella.eclipse.mcp.stm32.internal.FlashStatusTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.DelegateCheckTool"/>
    </extension>
 </plugin>
