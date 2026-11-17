@@ -202,7 +202,15 @@ public final class RegenerateTool implements IMcpTool {
         try {
             Process process = new ProcessBuilder("git", "status", "--porcelain") //$NON-NLS-1$ //$NON-NLS-2$
                     .directory(root.toFile()).redirectErrorStream(true).start();
-            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+            // Porcelain status is XY per line: a leading space on the first line
+            // means "worktree modified, not staged" and is part of the data. Trim
+            // only the trailing newline, never the leading whitespace.
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            int end = output.length();
+            while (end > 0 && (output.charAt(end - 1) == '\n' || output.charAt(end - 1) == '\r')) {
+                end--;
+            }
+            output = output.substring(0, end);
             return process.waitFor(5, TimeUnit.SECONDS) && process.exitValue() == 0 ? output : "unavailable"; //$NON-NLS-1$
         } catch (IOException e) {
             return "unavailable: " + e.getMessage(); //$NON-NLS-1$
