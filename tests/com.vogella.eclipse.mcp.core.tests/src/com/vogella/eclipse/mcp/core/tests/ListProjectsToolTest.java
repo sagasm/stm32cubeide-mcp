@@ -12,6 +12,8 @@ import org.eclipse.core.runtime.NullProgressMonitor;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import com.vogella.eclipse.mcp.core.McpToolResult;
+
 class ListProjectsToolTest {
 
 	private final TestFixture fixture = new TestFixture();
@@ -71,6 +73,79 @@ class ListProjectsToolTest {
 		// the closed project's nature is read from disk, so both are counted
 		Map<String, Object> byNature = (Map<String, Object>) result.get("byNature");
 		assertTrue(((Number) byNature.get("org.eclipse.jdt.core.javanature")).intValue() >= 2, "got " + result);
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void filtersByNatureAsStringAndArray() throws Exception {
+		String javaNature = "org.eclipse.jdt.core.javanature";
+		fixture.createJavaProject("mcp-list-nature-java");
+		fixture.createProject("mcp-list-nature-plain");
+
+		Map<String, Object> single = TestFixture.callAndParse("eclipse_list_projects",
+				Map.of("natureFilter", javaNature, "namePattern", "mcp-list-nature-*"));
+		List<Map<String, Object>> projects = (List<Map<String, Object>>) single.get("projects");
+		assertEquals(1, projects.size(), "got " + projects);
+		assertEquals("mcp-list-nature-java", projects.get(0).get("name"));
+
+		Map<String, Object> array = TestFixture.callAndParse("eclipse_list_projects",
+				Map.of("natureFilter", List.of(javaNature, "org.eclipse.cdt.core.cnature"),
+						"namePattern", "mcp-list-nature-*"));
+		assertEquals(Integer.valueOf(1), array.get("total"), "got " + array);
+	}
+
+	@Test
+	void openOnlyDropsClosedProjects() throws Exception {
+		fixture.createJavaProject("mcp-list-openonly-open");
+		fixture.createJavaProject("mcp-list-openonly-closed").getProject().close(new NullProgressMonitor());
+
+		Map<String, Object> result = TestFixture.callAndParse("eclipse_list_projects",
+				Map.of("openOnly", Boolean.TRUE, "namePattern", "mcp-list-openonly-*"));
+
+		assertEquals(Integer.valueOf(1), result.get("total"), "got " + result);
+		assertTrue(((Number) result.get("workspaceTotal")).intValue() >= 2, "got " + result);
+	}
+
+	@Test
+	void namePatternIsACaseInsensitiveGlob() throws Exception {
+		fixture.createProject("mcp-list-glob-Alpha");
+		fixture.createProject("mcp-list-glob-beta");
+
+		Map<String, Object> result = TestFixture.callAndParse("eclipse_list_projects",
+				Map.of("namePattern", "MCP-LIST-GLOB-A*"));
+
+		assertEquals(Integer.valueOf(1), result.get("total"), "got " + result);
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void stateMarkerReportsTheBeforeAndAfterOfAStateChange() throws Exception {
+		IProject project = fixture.createProject("mcp-list-marker-state");
+
+		Map<String, Object> change = TestFixture.callAndParse("eclipse_set_project_state",
+				Map.of("state", "closed", "projects", List.of(project.getName()), "dryRun", Boolean.FALSE));
+		String marker = String.valueOf(change.get("stateMarker"));
+		assertTrue(marker.startsWith("mcpprojstate-"), "got " + marker);
+
+		Map<String, Object> result = TestFixture.callAndParse("eclipse_list_projects",
+				Map.of("stateMarker", marker, "namePattern", project.getName()));
+
+		assertEquals(Boolean.TRUE, result.get("sinceStateMarker"));
+		assertEquals(Integer.valueOf(1), result.get("stateChangedCount"), "got " + result);
+		List<Map<String, Object>> changes = (List<Map<String, Object>>) result.get("stateChanges");
+		assertEquals(1, changes.size(), "got " + result);
+		assertEquals(project.getName(), changes.get(0).get("name"));
+		assertEquals("open", changes.get(0).get("from"));
+		assertEquals("closed", changes.get(0).get("to"));
+	}
+
+	@Test
+	void rejectsAnUnknownStateMarker() throws Exception {
+		McpToolResult result = TestFixture.call("eclipse_list_projects",
+				Map.of("stateMarker", "mcpprojstate-999999"));
+
+		assertTrue(result.isError(), result.text());
+		assertTrue(result.text().contains("set_project_state"), result.text());
 	}
 
 	@SuppressWarnings("unchecked")

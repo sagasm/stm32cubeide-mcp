@@ -1,6 +1,7 @@
 package com.vogella.eclipse.mcp.basic.internal;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -32,7 +33,7 @@ public final class SetProjectStateTool implements IMcpTool {
 
 	@Override
 	public String getDescription() {
-		return "Opens or closes projects. MODIFIES THE WORKSPACE, though reversibly: closing a project loses no files and runs no project code. Runs as a dry run unless dryRun is set to false. Closing a project that open projects depend on creates build path errors in those projects rather than removing errors, so dependents are always reported and closing is refused unless force is set. Use platformMismatch to select projects whose bundle cannot run on this platform, read from the Eclipse-PlatformFilter manifest header."; //$NON-NLS-1$
+		return "Opens or closes projects. MODIFIES THE WORKSPACE, though reversibly: closing a project loses no files and runs no project code. Runs as a dry run unless dryRun is set to false. Closing a project that open projects depend on creates build path errors in those projects rather than removing errors, so dependents are always reported and closing is refused unless force is set. Use platformMismatch to select projects whose bundle cannot run on this platform, read from the Eclipse-PlatformFilter manifest header. The response carries a stateMarker: pass it to eclipse_list_projects as stateMarker to see which projects changed open/closed state since, so a later read can report the before/after without the client storing its own snapshot."; //$NON-NLS-1$
 	}
 
 	@Override
@@ -57,6 +58,13 @@ public final class SetProjectStateTool implements IMcpTool {
 	@Override
 	public McpToolResult call(Map<String, Object> arguments, IProgressMonitor monitor) {
 		ToolArguments args = ToolArguments.of(arguments);
+		// snapshot before touching anything: the marker has to describe the "before"
+		// side, or a later list_projects call would only see the settled state
+		Map<String, String> states = new LinkedHashMap<>();
+		for (IProject project : ResourcesPlugin.getWorkspace().getRoot().getProjects()) {
+			states.put(project.getName(), project.isOpen() ? "open" : "closed"); //$NON-NLS-1$ //$NON-NLS-2$
+		}
+		String stateMarker = ProjectStateBaselines.take(states);
 		String state = args.getString("state"); //$NON-NLS-1$
 		if (!"open".equals(state) && !"closed".equals(state)) { //$NON-NLS-1$ //$NON-NLS-2$
 			return McpToolResult.error("The argument 'state' is required and must be 'open' or 'closed'."); //$NON-NLS-1$
@@ -126,6 +134,7 @@ public final class SetProjectStateTool implements IMcpTool {
 				.put("changed", changed) //$NON-NLS-1$
 				.put("skipped", skipped) //$NON-NLS-1$
 				.put("truncated", considered > reported.size()) //$NON-NLS-1$
+				.put("stateMarker", stateMarker) //$NON-NLS-1$
 				.put("projects", reported); //$NON-NLS-1$
 		return McpToolResult.of(result.toString());
 	}
