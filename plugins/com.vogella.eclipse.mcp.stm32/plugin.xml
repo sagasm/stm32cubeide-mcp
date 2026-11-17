@@ -14,5 +14,7 @@
       <tool class="com.vogella.eclipse.mcp.stm32.internal.DelegateCheckTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.SfrReadTool"/>
       <tool class="com.vogella.eclipse.mcp.stm32.internal.MemoryDumpTool"/>
+      <tool class="com.vogella.eclipse.mcp.stm32.internal.ProjectInfoTool"/>
+      <tool class="com.vogella.eclipse.mcp.stm32.internal.RegenerateTool"/>
    </extension>
 </plugin>
