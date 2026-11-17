@@ -3,6 +3,7 @@ package com.vogella.eclipse.mcp.core.tests;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -11,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.NullProgressMonitor;
 import org.junit.jupiter.api.AfterEach;
@@ -239,6 +241,107 @@ class ReadAndSearchToolsTest {
 		assertEquals(Integer.valueOf(1), result.get("files"));
 		assertEquals(Integer.valueOf(1), result.get("duplicatePathsCollapsed"));
 		assertNotNull(first(result).get("alsoVisibleAs"), "the other path should be reported, got " + first(result));
+	}
+
+	@Test
+	void excludesPathsDeclaredInCProject() throws Exception {
+		IProject project = fixture.createProject(PROJECT);
+		writeCProject(project, "Replace", "generated/*.txt");
+		writeIn(project, "Replace/hand.txt", "needle\n");
+		writeIn(project, "Replace/generated/copy.txt", "needle\n");
+
+		Map<String, Object> all = TestFixture.callAndParse("eclipse_search_text",
+				Map.of("pattern", "needle", "projects", List.of(PROJECT)));
+		assertEquals(Integer.valueOf(2), all.get("total"), "got " + all);
+
+		Map<String, Object> filtered = TestFixture.callAndParse("eclipse_search_text", Map.of("pattern", "needle",
+				"projects", List.of(PROJECT), "excludeGenerated", Boolean.TRUE));
+		assertEquals(Integer.valueOf(1), filtered.get("total"), "got " + filtered);
+		assertEquals(Integer.valueOf(1), filtered.get("excludedByCProject"));
+		assertTrue(String.valueOf(first(filtered).get("file")).endsWith("hand.txt"));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void groupsMatchesAndIncludesNumberedContext() throws Exception {
+		IProject project = fixture.createProject(PROJECT);
+		writeIn(project, "a.txt", "before\nneedle\nafter\n");
+		writeIn(project, "b.txt", "other\nneedle\nend\n");
+
+		Map<String, Object> result = TestFixture.callAndParse("eclipse_search_text",
+				Map.of("pattern", "needle", "projects", List.of(PROJECT), "grouped", Boolean.TRUE,
+						"contextLines", Integer.valueOf(1)));
+
+		List<Map<String, Object>> groups = (List<Map<String, Object>>) result.get("groups");
+		assertEquals(1, groups.size(), "got " + result);
+		assertEquals(PROJECT, groups.get(0).get("project"));
+		assertEquals(2, ((List<?>) groups.get(0).get("files")).size());
+
+		Map<String, Object> match = first(result);
+		List<Map<String, Object>> context = (List<Map<String, Object>>) match.get("context");
+		assertEquals(3, context.size(), "got " + context);
+		assertEquals(Integer.valueOf(2), context.get(1).get("line"));
+		assertEquals("needle", context.get(1).get("text"));
+	}
+
+	@Test
+	@SuppressWarnings("unchecked")
+	void comparesAReplacementWithItsGeneratedCounterpart() throws Exception {
+		IProject project = fixture.createProject(PROJECT);
+		writeIn(project, "Replace/diff.txt", "needle here\n");
+		writeIn(project, "Core/diff.txt", "needle there\n");
+		writeIn(project, "Replace/only.txt", "needle only\n");
+
+		Map<String, Object> result = TestFixture.callAndParse("eclipse_search_text",
+				Map.of("pattern", "needle", "projects", List.of(PROJECT),
+						"compareSourceSets", List.of("Replace", "Core")));
+		assertEquals(Integer.valueOf(3), result.get("total"));
+
+		List<Map<String, Object>> comparisons = (List<Map<String, Object>>) result.get("comparisons");
+		assertEquals(2, comparisons.size(), "got " + result);
+		Map<String, Object> different = comparisons.stream()
+				.filter(item -> "diff.txt".equals(item.get("relativePath"))).findFirst().orElseThrow();
+		assertEquals("different", different.get("status"));
+		assertNotNull(different.get("first"));
+		assertNotNull(different.get("second"));
+		Map<String, Object> only = comparisons.stream()
+				.filter(item -> "only.txt".equals(item.get("relativePath"))).findFirst().orElseThrow();
+		assertEquals("only-in-first", only.get("status"));
+		assertNull(only.get("second"));
+	}
+
+	@Test
+	void refusesASingleCompareSourceSet() throws Exception {
+		fixture.createProject(PROJECT);
+		McpToolResult result = TestFixture.call("eclipse_search_text",
+				Map.of("pattern", "needle", "compareSourceSets", List.of("Replace")));
+
+		assertTrue(result.isError(), result.text());
+		assertTrue(result.text().contains("exactly two"), result.text());
+	}
+
+	private static void writeCProject(IProject project, String source, String excluding) throws Exception {
+		String xml = """
+				<?xml version="1.0" encoding="UTF-8"?>
+				<cproject>
+				  <sourceEntries>
+				    <entry kind="sourcePath" name="%s" excluding="%s"/>
+				  </sourceEntries>
+				</cproject>
+				""".formatted(source, excluding);
+		IFile file = project.getFile(".cproject");
+		file.create(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)), true, new NullProgressMonitor());
+	}
+
+	private static IFile writeIn(IProject project, String path, String content) throws Exception {
+		IFile file = project.getFile(path);
+		IFolder parent = (IFolder) file.getParent();
+		if (!parent.exists()) {
+			parent.create(true, true, new NullProgressMonitor());
+		}
+		file.create(new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8)), true,
+				new NullProgressMonitor());
+		return file;
 	}
 
 	private static IFile write(IProject project, String name, String content) throws Exception {
