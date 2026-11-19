@@ -14,6 +14,7 @@ import org.eclipse.cdt.dsf.concurrent.DataRequestMonitor;
 import org.eclipse.cdt.dsf.concurrent.ImmediateDataRequestMonitor;
 import org.eclipse.cdt.dsf.concurrent.ImmediateRequestMonitor;
 import org.eclipse.cdt.dsf.concurrent.Query;
+import org.eclipse.cdt.dsf.datamodel.DMContexts;
 import org.eclipse.cdt.dsf.datamodel.IDMContext;
 import org.eclipse.cdt.dsf.debug.service.IBreakpoints;
 import org.eclipse.cdt.dsf.debug.service.IProcesses;
@@ -23,6 +24,7 @@ import org.eclipse.cdt.dsf.debug.service.command.ICommand;
 import org.eclipse.cdt.dsf.debug.service.command.ICommandControlService;
 import org.eclipse.cdt.dsf.gdb.launching.GdbLaunch;
 import org.eclipse.cdt.dsf.mi.service.IMICommandControl;
+import org.eclipse.cdt.dsf.mi.service.IMIContainerDMContext;
 import org.eclipse.cdt.dsf.mi.service.IMIProcesses;
 import org.eclipse.cdt.dsf.mi.service.command.CommandFactory;
 import org.eclipse.cdt.dsf.mi.service.command.output.MIArg;
@@ -86,6 +88,26 @@ public final class DebugSessions {
 	private static final Map<String, List<IRunControl.IExecutionDMContext>> EXEC_CONTEXTS = new ConcurrentHashMap<>();
 
 	private DebugSessions() {
+	}
+
+	/**
+	 * Feeds contexts learned from DSF state-change events into the shared caches.
+	 * Called by {@link DsfContextSynchronizer} for every session, including ones
+	 * started from the Debug view rather than through this bundle's launch tool.
+	 * A context seen here lets a later steer pause a running target even when
+	 * {@code -list-thread-groups} answers empty.
+	 */
+	static void noteContexts(String dsfSessionId, IRunControl.IExecutionDMContext context) {
+		if (dsfSessionId == null || context == null) {
+			return;
+		}
+		IMIContainerDMContext container = DMContexts.getAncestorOfType(context, IMIContainerDMContext.class);
+		if (container != null && container.getGroupId() != null) {
+			GROUP_IDS.put(dsfSessionId, container.getGroupId());
+		}
+		List<IRunControl.IExecutionDMContext> snapshot = new ArrayList<>();
+		snapshot.add(context);
+		EXEC_CONTEXTS.put(dsfSessionId, snapshot);
 	}
 
 	/** Registers a launch and returns its session id. */
@@ -574,8 +596,11 @@ public final class DebugSessions {
 									groupId = GROUP_IDS.get(session.getId());
 								}
 								if (groupId == null) {
-									rm.setStatus(Status.error("gdb reports no thread-group to steer."));
-									rm.done();
+									// No group id from MI (a running/foreign session). The DSF event
+									// listener may still have cached a live execution context from an
+									// earlier suspend (e.g. halt at main); steer through that before
+									// giving up.
+									steerFromCache(runControl, session.getId(), action, threadIndex, rm);
 									return;
 								}
 								IProcesses.IProcessDMContext procDmc = miProcesses

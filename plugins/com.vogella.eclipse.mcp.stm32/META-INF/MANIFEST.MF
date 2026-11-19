@@ -5,7 +5,8 @@ Bundle-SymbolicName: com.vogella.eclipse.mcp.stm32;singleton:=true
 Bundle-Version: 3.2.0.qualifier
 Bundle-Vendor: vogella GmbH
 Bundle-RequiredExecutionEnvironment: JavaSE-21
-Bundle-ActivationPolicy: lazy
+Bundle-ActivationPolicy: eager
+Bundle-Activator: com.vogella.eclipse.mcp.stm32.internal.Activator
 Automatic-Module-Name: com.vogella.eclipse.mcp.stm32
 Require-Bundle: org.eclipse.core.runtime;bundle-version="3.31.0",
  org.eclipse.core.resources;bundle-version="3.20.0",
