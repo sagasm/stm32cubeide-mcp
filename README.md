@@ -1,84 +1,62 @@
-<img src="docs/images/logo256.png" alt="" width="128" align="right">
+# STM32CubeIDE MCP Server
 
-# Eclipse MCP Server
+A fork of [vogella's Eclipse MCP Server](https://github.com/vogellacompany/eclipse-mcp-server), adapted for **STM32CubeIDE** and embedded STM32/Cortex-M development. It turns a running STM32CubeIDE into an [MCP](https://modelcontextprotocol.io) server so an LLM client can ask the IDE for the things it cannot reconstruct from files alone: the CDT C/C++ index, build problems, the live debug session on the target, and CubeIDE's firmware project model.
 
-Turns a running Eclipse IDE into an [MCP](https://modelcontextprotocol.io) server, so that external LLM clients (Claude Code, Cursor, any MCP-capable agent) can ask the IDE for what they cannot cheaply reconstruct from files: the resolved Java model, the builder's problem markers, the debugger and the live workbench.
+The server is **disabled by default**, binds `127.0.0.1` only, and rejects requests without the bearer token. Most tools are read-only; tools that write say so in their own description and default to a dry run where one makes sense.
 
-Built and maintained by [vogella GmbH](https://vogella.com/services/), and used in our consulting and in our AI based Java cleanup services [for legacy code and code optimization](https://vogella.com/services/).
+## What is different from upstream
 
-The server is **disabled by default**, listens on `127.0.0.1` only and rejects every request without the bearer token.
-Most tools are read-only; every tool that changes something says so in its own description, and those that can default to a dry run do.
+This fork is deliberately narrowed to embedded work:
 
-<p align="center">
-  <img src="docs/images/splash-animated.webp" alt="The Eclipse MCP Server splash screen" width="600">
-</p>
+- **Removed** the `jdt`, `debug`, `pde`, `git`, `ide` and `p2` bundles from the reactor and feature.
+- **Added** two provider bundles: `com.vogella.eclipse.mcp.cdt` (CDT index navigation for C/C++) and `com.vogella.eclipse.mcp.stm32` (CubeIDE launch/flash, DSF/GDB debug control, register and memory access, CubeMX project info).
+- Kept `core`, `basic`, `server` and `ui`. The 55 tools fall into the `eclipse_*`, `cdt_*`, `cubeide_*`, `stm32_*` groups plus `mcp_hot_reload` (see [Tools](#tools)).
+- Verified against **STM32CubeIDE V2** with a J-Link probe on SWD. The maintainers' target board is a KZ036 carrying a GD32F450 used in place of the STM32F429ZI; the ST launch plug-in has a local, intentional vendor-check stub.
 
-## Installing
+## Requirements
 
-In Eclipse, choose *Help > Install New Software*, add
-
-```
-https://vogellacompany.github.io/eclipse-mcp-server/
-```
-
-and install the **Eclipse MCP Server** feature.
-The site lists the newest build only; older versions are available as the repository zip attached to each GitHub release, through *Add > Archive*.
+- **STM32CubeIDE V2** (Eclipse 4.38 / CDT 12.3 / Java 17-era platform).
+- **JDK 25** for Maven and for running the IDE's MCP bundles. CubeIDE ships its own JRE 21; point `stm32cubeide.ini`'s `-vm` at a JDK 25 `java.exe` (keep a backup of the `.ini`). Without this the Java 25 bundles do not resolve.
+- **Maven 3.9+** (Tycho needs a recent Maven for pomless builds).
+- A debug probe supported by the IDE's ST launch configuration (J-Link on SWD is what is exercised here).
 
 ## Building
 
-Requires JDK 25 and Maven 3.9 or newer.
+From the repository root (`server/`):
 
 ```bash
 mvn clean verify
 ```
 
-The p2 repository ends up in `update-site/com.vogella.eclipse.mcp.repository/target/repository`.
+The p2 repository is produced at `update-site/com.vogella.eclipse.mcp.repository/target/repository`. Always build from the root: a module directory lacks the sibling bundles in the reactor, and `-pl` on one bundle still resolves the whole target platform, so there is no faster partial build.
+
 To work on the code in Eclipse, import the projects with *Search for nested projects* enabled and set `target-platform/com.vogella.eclipse.mcp.target/com.vogella.eclipse.mcp.target.target` as the active target platform.
 
-Every push to `main` publishes to the update site; pushing a `v<version>` tag additionally creates a GitHub release with the repository zip.
+The Tycho test bundles under `tests/` are **not** part of this build's reactor (they still declare dependencies on bundles this fork removed). Build verification therefore covers the main code; behaviour is checked with the end-to-end smoke suite described below.
 
-## Enabling the server
+## Installing and updating
 
-*Preferences > General > MCP Server*:
+Install the six MCP bundles directly into the CubeIDE installation with the p2 director. From the workspace root:
 
-* **Enable MCP server**, off by default
-* **Port**, `8642` by default
-* **Tool call timeout**, `30` seconds by default
-* **UI thread wait**, `25` seconds by default: how long a tool waits for a busy UI thread before it withdraws the request, capped by the tool call timeout
-
-Changes apply immediately.
-The page also shows the URL, the bearer token and the discovery file, and can regenerate the token.
-By default, if the configured port is taken, the server stays down and the page says why.
-To enable best-effort port reuse, add `-Dcom.vogella.eclipse.mcp.server.ephemeralPort=true` after `-vmargs` in `eclipse.ini`; the page then disables the port field, and the stored value applies again once the property is gone.
-Every successful startup saves its listening port as `lastPort` in `<workspace>/.metadata/.plugins/com.vogella.eclipse.mcp.server/port.properties`, regardless of mode.
-Fixed-port mode always binds only to the configured preference and never reads the saved port for binding; ephemeral mode tries the saved port first, unless it equals the configured fixed port, in which case it requests an OS-assigned port.
-If that port is occupied, it immediately asks the operating system to assign another; failures reading or writing the file do not prevent startup.
-The actual endpoint remains in `endpoint.json`, which clients must rediscover after every restart.
-
-### In an RCP application
-
-The server starts through a declarative service, so an RCP application needs `org.apache.felix.scr` and a workspace, but no `org.eclipse.ui.startup`.
-Install `com.vogella.eclipse.mcp.core`, `com.vogella.eclipse.mcp.basic`, `com.vogella.eclipse.mcp.server` and the third party bundles the feature lists; specialized provider bundles are optional and each adds its own tools.
-`com.vogella.eclipse.mcp.ui` also resolves in a pure E4 application that ships the `org.eclipse.ui` bundles it requires, which then gets the widget, screenshot, keyboard, dialog and settle tools, with parts named by their model element id; the tools built on editors, views, perspectives and workbench commands need the 3.x workbench and say so.
-Without the ui bundle there is no preference page, so enable the server in `plugin_customization.ini`:
-
-```
-com.vogella.eclipse.mcp.server/enabled=true
-com.vogella.eclipse.mcp.server/port=8642
+```bash
+python scripts/install_mcp.py
 ```
 
-The product only reads `plugin_customization.ini` when it points at it, with the `preferenceCustomization` product property or `-pluginCustomization <file>` on the command line.
+The IDE must be **closed** while this runs. It uninstalls the previously registered MCP IUs, removes orphan jars from the IDE's `plugins/` directory, and installs the freshly built bundles. Restart the IDE afterwards.
 
-The server bundle's built manifest requires the `osgi.component` extender, so without `org.apache.felix.scr` in the product it does not resolve.
-A product materialized by Tycho does not start bundles on its own, so start `org.apache.felix.scr` (`org.apache.felix.scr@2:start` in `config.ini`) for the server, and `org.eclipse.core.runtime@start` and `org.eclipse.equinox.common@2:start` for the application itself, in the `.product` configuration or as `osgi.bundles` entries; an application whose runtime bundles are not started fails with "Unable to acquire application service".
+For day-to-day development, `mcp_hot_reload` updates a built bundle jar in the running IDE without a restart:
 
-The ui bundle is optional: `core`, `basic` and `server` run the server with the workspace, file, build and log tools but no UI tools.
-Adding `com.vogella.eclipse.mcp.ui` requires the 3.x workbench and the other bundles listed in its `META-INF/MANIFEST.MF`, but not `org.eclipse.ui.ide`, `org.eclipse.compare` or `org.eclipse.debug.ui`, so it adds no p2, navigator or Debug perspective to a product; leave it out unless you want the screenshot, widget and keyboard tools, or in an IDE the editor and view tools.
-`com.vogella.eclipse.mcp.ide` holds the IDE-only tools, `eclipse_open`, `eclipse_open_compare`, `eclipse_run_launch_shortcut` and `eclipse_import_project`; leave it out of an RCP product.
+```
+mcp_hot_reload(jar="E:/.../server/plugins/com.vogella.eclipse.mcp.stm32/target/com.vogella.eclipse.mcp.stm32-3.2.0-SNAPSHOT.jar", dryRun=false)
+```
 
-## Connecting a client
+Hot reload is **not persistent**: p2 restores the installed version on the next IDE restart. To make a change permanent, rebuild and run `install_mcp.py`.
 
-The server writes a discovery file:
+## Enabling and connecting
+
+Enable the server in *Preferences > General > MCP Server* (off by default; port `8642`, 30 s call timeout, 25 s UI wait). The page also shows the bearer token and the discovery file, and can regenerate the token.
+
+The server writes its endpoint to:
 
 ```
 <workspace>/.metadata/.plugins/com.vogella.eclipse.mcp.server/endpoint.json
@@ -89,171 +67,109 @@ The server writes a discovery file:
   "state": "listening",
   "url": "http://127.0.0.1:8642/mcp",
   "token": "0f0f2a2e-1f9c-4c4a-9a0e-6d0f8f0f1e2b",
-  "workspace": "/home/me/workspace/swt",
-  "startedAt": 1787300000000
+  "workspace": "/path/to/workspace"
 }
 ```
 
-For Claude Code:
+Connect an MCP client to that URL with `Authorization: Bearer <token>`. For Claude Code:
 
 ```bash
-claude mcp add --transport http eclipse http://127.0.0.1:8642/mcp \
+claude mcp add --transport http cubeide http://127.0.0.1:8642/mcp \
   --header "Authorization: Bearer $(jq -r .token <workspace>/.metadata/.plugins/com.vogella.eclipse.mcp.server/endpoint.json)"
 ```
 
-The transport is Streamable HTTP and every request carries `Authorization: Bearer <token>`; anything else gets a `401`.
-The token lives in `~/.eclipse/com.vogella.eclipse.mcp.server/token` with owner-only permissions and survives restarts, updates and workspace switches.
-With two IDEs open on the same fixed port, only the one that bound the port can serve it; in ephemeral-port mode each may use a different port.
-The `workspace` field in the discovery file tells which workspace an endpoint serves.
-After `eclipse_restart`, compare `startedAt` to know the new server is up; some clients need a manual reconnect, in Claude Code through `/mcp`.
+The transport is Streamable HTTP; every request carries the bearer token and anything else gets a `401`. The token lives in `~/.eclipse/com.vogella.eclipse.mcp.server/token` with owner-only permissions, shared across workspaces. Several clients may share one server; after an IDE restart the client must reconnect and re-read `endpoint.json`, because a fresh start may bind a different port.
 
-Several clients can share one server.
-While more than one is connected, `eclipse_get_build_status`, `eclipse_get_test_results`, `eclipse_stop_sampling` and `eclipse_get_provisioning_status` refuse to guess "the most recent" entry, so pass the id explicitly.
-
-The server offers tools only: `initialize`, `ping`, `tools/list` and `tools/call`.
-Every tool returns pretty-printed JSON, and every list-returning tool honours `maxResults` and reports `total` and `truncated`.
-
-## Scripting the IDE from outside
-
-`eclipse_run_script` runs a sequence of tools with assertions in one call, and two scripts in `releng` make that runnable from a build:
-
-```bash
-# against the IDE you are working in
-releng/mcp-script.py releng/scripts/content-assist.json
-
-# against a throwaway IDE, on a workspace and a port of its own
-releng/mcp-test-ide.sh --ide /path/to/eclipse --junit results.xml releng/scripts/smoke.json
-```
-
-`mcp-script.py` prints each step, exits non-zero on a failed expectation and can write JUnit XML.
-`mcp-test-ide.sh` starts the IDE on a fresh workspace and configuration area, sharing the installation's plug-ins but not any bundle substituted into it, runs the scripts and shuts the IDE down again.
-`--bundle <jar>` runs a patched bundle in that private configuration only.
-`--serve` keeps the IDE up for interactive use until the script is terminated.
-If the IDE exits on its own during `--serve`, the script exits with the IDE's status and, when that is not 0, keeps the workspace and prints the last lines of its logs.
-`--vm` names the java executable for an installation without a JRE.
-On macOS, `--ide` takes the `.app` bundle or the directory holding it.
-
-## Testing Eclipse and SWT changes
-
-The UI tools address widgets by their place in the SWT hierarchy rather than by screen coordinates, so a check survives a resize, a theme and another machine:
-
-1. `eclipse_list_ui_targets` names the shells and parts; `eclipse_get_widget_tree` lists the widgets under one with a path for each, bounds in three coordinate systems, CSS id and class, and with `includeMetrics` what the control computes for itself: preferred size, trim, font and item height.
-2. `eclipse_press_widget`, `eclipse_set_widget_text`, `eclipse_select_tab`, `eclipse_expand_row`, `eclipse_click`, `eclipse_drag`, `eclipse_scroll`, `eclipse_press_key` and `eclipse_type_text` act on a path; key and click fall back to SWT events where the window system refuses synthetic input.
-3. `eclipse_wait_for` waits for a shell, widget, selection, editor or job condition, and `eclipse_wait_until_settled` for the display queue, the jobs and the reconcilers.
-4. `eclipse_screenshot` captures a part, a shell, a widget, a screen region or the display; `settle` and `settlePixels` make a capture repeatable, and `method: print` paints the widgets instead of reading the screen.
-5. `eclipse_mark_log` and then `eclipse_get_log_entries` show what an action logged, UI freezes included.
-
-To run modified SWT or platform code, import the bundle's project into the IDE's workspace, build it, run `eclipse_substitute_bundle` with `action: substitute` and then `eclipse_restart`; `action: restore` and another restart put the installed bundle back.
-For SWT, import the fragment for your platform, such as `binaries/org.eclipse.swt.gtk.linux.x86_64`, from a checkout whose native libraries match the Java code: a checkout without Git LFS has pointer files in their place, which the substitution refuses.
-`eclipse_hot_code_replace` redefines changed classes without a restart where the change allows it.
+Tools only: `initialize`, `ping`, `tools/list`, `tools/call`. Every tool returns JSON, and every list-returning tool honours `maxResults` and reports `total` and `truncated`.
 
 ## Tools
 
-Tools marked ✎ change something; the rest are read-only.
+55 tools are exposed. ✎ marks a tool that changes something.
 
-**Workspace and files**
-
-| Tool | Purpose |
-|---|---|
-| `eclipse_list_projects` | Projects with natures and open state |
-| `eclipse_resolve_path` | Maps project names, workspace paths and absolute paths to each other and to the git repository |
-| `eclipse_read_file`, `eclipse_search_text`, `eclipse_find_resources` | Read files, search their text, find files by name in workspace, target platform and installation |
-| `eclipse_read_image` | Return a PNG, JPEG, GIF or WebP from a project as an image the model can see |
-| ✎ `eclipse_write_file`, `eclipse_edit_file` | Write a file or replace a passage, keeping the old content in local history |
-| `eclipse_get_local_history`, ✎ `eclipse_restore_local_history` | List, read and restore the versions Eclipse keeps of a file, including a deleted one |
-| ✎ `eclipse_delete` | Delete a source file, reporting registry and manifest entries that would dangle |
-| ✎ `eclipse_refresh`, `eclipse_save_workspace` | Pick up external changes, save the workspace |
-| ✎ `eclipse_set_project_state`, `eclipse_import_project`, `eclipse_remove_project` | Open, close, import and remove projects |
-| `eclipse_get_project_dependencies`, `eclipse_get_classpath` | Project references and the resolved build path |
-
-**Problems, builds and logs**
+**Workspace, build and IDE basics (`eclipse_*`)**
 
 | Tool | Purpose |
 |---|---|
-| `eclipse_get_problems`, `eclipse_mark_problems` | Compiler errors and warnings, and a baseline to compare against |
-| ✎ `eclipse_build`, `eclipse_cancel_build`, `eclipse_get_build_status` | Run builders as a job and poll the result |
-| `eclipse_wait_until_quiet`, `eclipse_pause` | Wait for builds and refreshes, or for a fixed time |
-| `eclipse_get_log_entries`, `eclipse_mark_log` | Read the Error Log, optionally from a marker |
-| `eclipse_get_startup_timing` | When the process, framework, application and main window started and what each bundle activation took, each measured or null with a reason |
-| ✎ `eclipse_clear_log`, `eclipse_log_status` | Empty the Error Log, write an entry into it |
-| `eclipse_get_preferences`, ✎ `eclipse_set_preference` | Read and write preferences, with the scope each value comes from |
-| ✎ `eclipse_run_command`, `eclipse_get_command_output` | Run a shell command in a named directory and poll its output |
+| `eclipse_list_projects`, `eclipse_resolve_path`, `eclipse_get_project_dependencies` | Project inventory, path mapping, resolved build path |
+| `eclipse_read_file`, `eclipse_search_text`, `eclipse_read_image` | Read files (optionally a dirty editor buffer), search text, read an image from a project |
+| ✎ `eclipse_write_file`, `eclipse_edit_file` | Write and edit files, keeping the previous content in local history |
+| `eclipse_get_local_history`, ✎ `eclipse_restore_local_history` | List and restore Eclipse's file history |
+| ✎ `eclipse_refresh`, `eclipse_save_workspace`, `eclipse_set_project_state`, `eclipse_remove_project` | Workspace housekeeping |
+| `eclipse_get_problems`, `eclipse_mark_problems` | Compiler markers with source-set filtering and a comparison baseline |
+| ✎ `eclipse_build`, `eclipse_cancel_build`, `eclipse_get_build_status`, `eclipse_wait_until_quiet` | Build as a job, poll, cancel, wait for quiet |
+| `eclipse_get_log_entries`, `eclipse_mark_log`, ✎ `eclipse_clear_log`, `eclipse_log_status` | Error Log with byte markers, stack paging, clear and write |
+| `eclipse_get_preferences`, ✎ `eclipse_set_preference` | Preferences with scope and batch read/write; writes report previous values for rollback |
+| ✎ `eclipse_run_command`, `eclipse_get_command_output`, `eclipse_run_script` | Shell command with output polling; scripted tool sequences with expectations, `found` and resume cursor |
+| `eclipse_get_startup_timing` | Observed startup phases and bundle activation times |
+| ✎ `eclipse_install_bundle`, `eclipse_substitute_bundle` | Live bundle install and workspace-bundle substitution |
+| ✎ `eclipse_start_flight_recording`, `eclipse_stop_flight_recording` | JFR recording and analysis |
 
-**Java**
-
-| Tool | Purpose |
-|---|---|
-| `eclipse_find_references` | References to a type or member, single or batched as counts |
-| `eclipse_list_declarations` | Declarations cross-checked against the extension registry and e4 models, for dead code sweeps |
-| `eclipse_get_call_hierarchy`, `eclipse_get_type_hierarchy` | Callers, supertypes and subtypes |
-| `eclipse_get_source`, `eclipse_get_outline`, `eclipse_search_types` | Source and Javadoc of any type or single member on the classpath, a type's members with signatures and line ranges, type search by name |
-| ✎ `eclipse_rename` | Rename through the JDT refactoring |
-| ✎ `eclipse_clean_up`, `eclipse_remove_unused_imports`, `eclipse_organize_imports`, `eclipse_format` | JDT clean-ups, import handling and formatting |
-| ✎ `eclipse_set_java_version` | Set a project's compiler level and JDK |
-| ✎ `eclipse_run_tests`, `eclipse_get_test_results` | Run JUnit tests with optional VM arguments and read the results |
-| ✎ `eclipse_hot_code_replace` | Redefine classes in the running IDE |
-
-**Plug-in development**
+**C/C++ navigation (`cdt_*`, CDT index)**
 
 | Tool | Purpose |
 |---|---|
-| `eclipse_get_bundle_info`, `eclipse_analyze_dependencies` | Bundles as PDE resolved them, declared versus used dependencies |
-| ✎ `eclipse_edit_manifest`, `eclipse_set_bree` | Edit manifest headers, set the execution environment |
-| `eclipse_get_target_platform`, ✎ `eclipse_set_target_platform` | Read and set the active target platform |
-| ✎ `eclipse_install_bundle`, `eclipse_substitute_bundle` | Install a bundle into the live framework, or run a workspace bundle in place of the installed one |
+| `cdt_find_symbols` | Find symbol definitions by name, with path and line |
+| `cdt_open_symbol` | Resolve a symbol to its definition and surrounding source snippet |
+| `cdt_outline` | Declarations in a C/C++ file, including macros with approximate-location notes |
+| `cdt_type_members` | Fields of a struct/union/class or enumerators of an enum |
+| `cdt_find_references` | Call sites and uses of a symbol, with line text |
+| `cdt_call_hierarchy` | Callers and callees of a function, recursively |
 
-**Debugging and profiling**
-
-| Tool | Purpose |
-|---|---|
-| `eclipse_list_breakpoints`, ✎ `eclipse_set_breakpoint` | Read and edit breakpoints |
-| `eclipse_list_launch_configurations`, ✎ `eclipse_debug_launch` | List and start launches |
-| `eclipse_debug_status`, `eclipse_debug_get_frames` | Sessions, threads, frames and variables |
-| ✎ `eclipse_debug_evaluate`, `eclipse_debug_control` | Evaluate expressions, step, resume and terminate |
-| `eclipse_start_sampling`, `eclipse_stop_sampling`, `eclipse_show_trace` | Sample thread stacks to profile or diagnose a freeze, and render them as a flame graph |
-| `eclipse_start_flight_recording`, `eclipse_stop_flight_recording` | Record the IDE's JVM with Java Flight Recorder, or read any `.jfr`, and report allocation, time per thread and window, what was thrown, and a flame graph of bytes or time |
-
-**Git**
+**CubeIDE project and CubeMX (`cubeide_*`)**
 
 | Tool | Purpose |
 |---|---|
-| `eclipse_get_git_status` | Repository state through EGit |
-| ✎ `eclipse_add_git_repository`, `eclipse_checkout`, `eclipse_fetch_pull_request` | Register a repository, switch branches, fetch a GitHub pull request |
-| ✎ `eclipse_revert_files` | Revert files to HEAD, keeping the discarded content in local history |
+| `cubeide_project_info` | MCU, firmware package, clock, enabled peripherals and active build configuration from `.ioc`/`.cproject` |
+| `cubeide_regenerate` | `dryRun` impact analysis or start a CubeMX regeneration; real runs open CubeMX, they do not drive its Generate button |
 
-**Workbench and UI**
-
-| Tool | Purpose |
-|---|---|
-| `eclipse_get_editor_context`, `eclipse_list_editors`, ✎ `eclipse_close_editor` | Active editor, cursor and selection, open editors |
-| ✎ `eclipse_open`, `eclipse_open_compare` | Open a file or element, open a compare editor |
-| `eclipse_get_selection`, ✎ `eclipse_set_selection` | Read and set the selection |
-| ✎ `eclipse_type_text`, `eclipse_press_key`, `eclipse_set_widget_text`, `eclipse_press_widget`, `eclipse_set_sash`, `eclipse_click`, `eclipse_drag`, `eclipse_scroll`, `eclipse_double_click_text`, `eclipse_expand_row`, `eclipse_select_tab`, `eclipse_combo_list` | Drive editors and widgets |
-| `eclipse_get_text_bounds`, `eclipse_list_annotations`, `eclipse_get_context_menu` | Text geometry, editor annotations, context menu contents |
-| `eclipse_read_clipboard` | Read the text on the system clipboard |
-| `eclipse_list_ui_targets`, `eclipse_get_widget_tree`, `eclipse_inspect_widget`, `eclipse_get_focus` | Shells, parts and widgets, with bounds, computed sizes, CSS styling and keyboard focus |
-| ✎ `eclipse_dismiss_dialog` | Answer an open dialog |
-| ✎ `eclipse_reset_dialog_settings` | Forget the answers wizards and dialogs remembered |
-| `eclipse_list_commands`, ✎ `eclipse_run_workbench_command` | List and run workbench commands |
-| ✎ `eclipse_run_launch_shortcut` | Invoke a Run As or Debug As shortcut on workspace resources (dry run by default), reporting the configurations it created and the launches it started |
-| ✎ `eclipse_select_menu_item` | Pick a main menu or context menu entry by its labels, without a native menu appearing |
-| ✎ `eclipse_show_view`, `eclipse_hide_view`, `eclipse_move_part`, `eclipse_set_part_state` | Arrange views |
-| `eclipse_list_perspectives`, ✎ `eclipse_switch_perspective`, `eclipse_reset_perspective` | Perspectives |
-| ✎ `eclipse_manage_window`, `eclipse_set_shell_bounds`, `eclipse_set_ide_visibility`, `eclipse_set_model_visibility` | Windows, their bounds, and what of the IDE is visible |
-| `eclipse_list_themes`, `eclipse_list_theme_definitions`, ✎ `eclipse_set_theme`, `eclipse_register_theme`, `eclipse_apply_css` | Themes and live CSS |
-| `eclipse_get_display_info`, `eclipse_screenshot`, `eclipse_start_screencast`, `eclipse_stop_screencast` | Display scaling, PNG captures and GIF recordings |
-| `eclipse_wait_until_settled` | Wait until the UI has stopped changing |
-| `eclipse_wait_for` | Wait until a shell, widget, selection, editor or job condition holds |
-| ✎ `eclipse_run_script` | Run several tools in sequence with expectations, optionally in one UI turn |
-
-**Installation**
+**STM32 debug and flash (`stm32_*`)**
 
 | Tool | Purpose |
 |---|---|
-| `eclipse_get_installation` | Product, installed features and revertable configurations |
-| ✎ `eclipse_add_repository`, `eclipse_remove_repository` | Manage update sites |
-| `eclipse_check_for_updates`, ✎ `eclipse_update`, `eclipse_install`, `eclipse_uninstall`, `eclipse_get_provisioning_status` | Update, install and uninstall through p2 |
-| ✎ `eclipse_restart`, `eclipse_exit` | Restart or shut down the IDE |
+| `stm32_list_launch_configurations` | Workspace launch configurations, their type, modes and `.launch` file |
+| `stm32_debug_delegate_check` | Diagnose a launch stuck in `launching` by running the delegate's checks step by step |
+| ✎ `stm32_debug_launch` | Start a launch configuration; `mode=debug` builds, flashes and stops in the debugger |
+| `stm32_debug_control` | Sessions/status and `continue`, `pause`, step and terminate through DSF/GDB |
+| `stm32_debug_evaluate` | Evaluate an expression, optionally at a given stack frame |
+| `stm32_debug_frames` | Call stack with locals, from the innermost frame |
+| `stm32_debug_breakpoints` | List, insert, delete, condition, enable and disable GDB breakpoints |
+| `stm32_debug_read_memory`, `stm32_memory_dump`, `stm32_sfr_read` | Raw bytes by address, dump by symbol or address, and peripheral registers |
+| ✎ `stm32_build_and_flash`, `stm32_flash_status` | Build and flash by starting a launch configuration; poll the result |
+
+**Server maintenance**
+
+| Tool | Purpose |
+|---|---|
+| ✎ `mcp_hot_reload` | Update MCP bundle jars into the running IDE without a restart |
+
+## Debug session notes
+
+STM32CubeIDE launches through CDT DSF/GDB, which has no classic `IDebugTarget`. Session state is read by querying GDB/MI directly and building DM contexts, with per-session caches for the thread-group id and last-seen execution contexts; this is what lets `continue` report `running` and lets `pause` steer a running target even when the IDE's container cache is stale. A launch call has side effects: `mode=debug` builds the project and flashes the target. Prefer read-only status calls before steering, and terminate sessions when done.
+
+A launch can leave a session stuck in `launching` if the IDE's launch worker deadlocks against a UI-thread view refresh. Such a session has no thread group and cannot be steered by `stm32_debug_control`; `stm32_debug_delegate_check` and the IDE's Error Log help confirm it. Use the IDE's own Suspend button, or attach J-Link GDB with `monitor halt` (read-only, do not reset) to inspect a running target.
+
+## Smoke tests
+
+The end-to-end suite lives in the workspace `scripts/` directory (outside this git repository) and drives a running IDE over MCP:
+
+```bash
+python scripts/run_smoke.py            # all cases
+python scripts/run_smoke.py --only t21 # one case
+python scripts/run_smoke.py --list
+```
+
+It shares one MCP session across cases, prints a PASS/FAIL line with the observed values for each assertion, sums them up, and exits non-zero on any failure. Cases cover the STM32 debug lifecycle (`t21`, `t22`), the CDT/nav and CubeIDE tools, and regressions such as launch-configuration counts, macro-location notes and `cubeide_regenerate dryRun` git status. Each case starts from a fresh debug session and terminates it afterwards; some write tools use dedicated qualifiers and roll back.
+
+## Bundles
+
+| Bundle | Contains |
+|---|---|
+| `com.vogella.eclipse.mcp.core` | Tool API, registry, extension point, shared infrastructure; no MCP, Jetty or UI dependency |
+| `com.vogella.eclipse.mcp.basic` | Workspace, file, build, preference, log, command and related tools |
+| `com.vogella.eclipse.mcp.server` | MCP protocol, embedded Jetty, bearer token, discovery file, hot reload |
+| `com.vogella.eclipse.mcp.ui` | Preference page and UI hooks; optional for a headless server |
+| `com.vogella.eclipse.mcp.cdt` | CDT index navigation for C/C++ |
+| `com.vogella.eclipse.mcp.stm32` | CubeIDE launch/flash, DSF/GDB debug control, memory and SFR access, CubeMX project info |
 
 ## Contributing a tool
 
@@ -265,26 +181,8 @@ Tools are contributed through the `com.vogella.eclipse.mcp.core.tools` extension
 </extension>
 ```
 
-`com.example.MyTool` implements `com.vogella.eclipse.mcp.core.IMcpTool`.
-It is called on a worker thread, must not open a dialog, must say in its description if it changes anything, and must finish within the call timeout or hand back a handle to poll.
-See `AGENTS.md` for the full set of rules.
+`com.example.MyTool` implements `com.vogella.eclipse.mcp.core.IMcpTool`. It runs on a worker thread, must not open a dialog, must mark itself as writing in its description, and must finish within the call timeout or return a handle to poll. See `AGENTS.md` for the full rules and gotchas.
 
-## Bundles
+## License
 
-| Bundle | Contains |
-|---|---|
-| `com.vogella.eclipse.mcp.core` | Provider-independent tool API, registry, extension point and shared infrastructure; no MCP, Jetty or UI dependency |
-| `com.vogella.eclipse.mcp.basic` | General-purpose workspace, file, build, preference, log, command and other basic tools; provider depending on core |
-| `com.vogella.eclipse.mcp.server` | MCP protocol, embedded Jetty, bearer token and discovery file |
-| `com.vogella.eclipse.mcp.ui` | Workbench tools, screenshots, widget inspection, preference page |
-| `com.vogella.eclipse.mcp.jdt` | Java model, refactoring, clean-up and test tools |
-| `com.vogella.eclipse.mcp.debug` | Breakpoint and debug session tools |
-| `com.vogella.eclipse.mcp.pde` | Plug-in development tools |
-| `com.vogella.eclipse.mcp.git` | EGit tools |
-| `com.vogella.eclipse.mcp.ide` | IDE-only tools: open in editor, compare, launch shortcuts, project import |
-| `com.vogella.eclipse.mcp.p2` | Provisioning tools |
-
-## Commercial support
-
-[vogella GmbH](https://vogella.com/services/) offers training and consulting around Eclipse and its tooling, and AI based Java cleanup [for legacy code and code optimization](https://vogella.com/services/).
-Issues and pull requests are welcome here; the commercial route exists for work that wants a schedule attached.
+Same terms as the upstream fork; see `LICENSE.md`.
