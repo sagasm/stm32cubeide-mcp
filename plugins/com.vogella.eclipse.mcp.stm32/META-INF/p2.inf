@@ -1,0 +1,10 @@
+# The stm32 bundle runs an eager Activator that installs the DSF session
+# listener before any debug session starts. p2 marks installed bundles as
+# non-auto-start by default, so declare auto-start at the artifact level:
+# every p2-based installation then activates the listener without a
+# post-install script patching configuration/.../bundles.info.
+instructions.configure=\
+ org.eclipse.equinox.p2.touchpoint.eclipse.markStarted(started:true);
+
+instructions.unconfigure=\
+ org.eclipse.equinox.p2.touchpoint.eclipse.markStarted(started:false);
